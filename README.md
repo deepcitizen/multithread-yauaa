@@ -1,5 +1,14 @@
 Yauaa: Yet Another UserAgent Analyzer
 ========================================
+
+> **This is a fork** of [Yauaa](https://github.com/nielsbasjes/yauaa) by Niels Basjes.
+> In this fork the analyzer is threadsafe and lock free (a single instance for all threads), parsing is faster
+> with a bounded worst case, deeply nested brackets no longer cause a `StackOverflowError` and an application
+> can analyze some useragents itself with a `UserAgentHandler` (see [CHANGELOG.md](CHANGELOG.md)).
+>
+> It is published as `io.github.deepcitizen:yauaa` (the Java packages are unchanged: `nl.basjes.parse.useragent`).
+> The badges and links below are about the original project.
+
 [![Github actions Build status](https://img.shields.io/github/actions/workflow/status/nielsbasjes/yauaa/build.yml?branch=main)](https://github.com/nielsbasjes/yauaa/actions)
 [![Coverage Status](https://img.shields.io/codecov/c/github/nielsbasjes/yauaa)](https://app.codecov.io/gh/nielsbasjes/yauaa)
 [![License](https://img.shields.io/:license-apache-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0.html)

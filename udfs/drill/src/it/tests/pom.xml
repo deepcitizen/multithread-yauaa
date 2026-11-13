@@ -20,7 +20,7 @@
   <modelVersion>4.0.0</modelVersion>
 
   <artifactId>yauaa-drill-tests</artifactId>
-  <groupId>nl.basjes.parse.useragent</groupId>
+  <groupId>io.github.deepcitizen</groupId>
   <version>0.0.1</version>
 
   <name>Yauaa : UDF : Apache Drill : Tests</name>
@@ -98,7 +98,7 @@
 
   <dependencies>
     <dependency>
-      <groupId>nl.basjes.parse.useragent</groupId>
+      <groupId>io.github.deepcitizen</groupId>
       <artifactId>yauaa-drill</artifactId>
       <version>@yauaa.version@</version>
     </dependency>

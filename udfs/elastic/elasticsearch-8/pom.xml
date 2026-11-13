@@ -21,7 +21,7 @@
 
   <parent>
     <artifactId>yauaa-elastic-udfs-parent</artifactId>
-    <groupId>nl.basjes.parse.useragent</groupId>
+    <groupId>io.github.deepcitizen</groupId>
     <version>8.3.1-SNAPSHOT</version>
   </parent>
   <artifactId>yauaa-elasticsearch-8</artifactId>
@@ -42,7 +42,7 @@
   <dependencies>
 
     <dependency>
-      <groupId>nl.basjes.parse.useragent</groupId>
+      <groupId>io.github.deepcitizen</groupId>
       <artifactId>yauaa</artifactId>
       <exclusions>
         <!-- To avoid the "jar hell!" failure when loading in ES. -->

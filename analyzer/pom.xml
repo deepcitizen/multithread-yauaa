@@ -21,15 +21,15 @@
 
   <parent>
     <artifactId>yauaa-parent</artifactId>
-    <groupId>nl.basjes.parse.useragent</groupId>
+    <groupId>io.github.deepcitizen</groupId>
     <version>8.3.1-SNAPSHOT</version>
   </parent>
   <artifactId>yauaa</artifactId>
 
   <name>Yauaa : Analyzer</name>
-  <description>A parsing and analyzing library to get information from a useragent string.</description>
+  <description>A parsing and analyzing library to get information from a useragent string. This is a fork of Yauaa (https://github.com/nielsbasjes/yauaa) with a threadsafe, lock free analyzer.</description>
 
-  <url>https://yauaa.basjes.nl</url>
+  <url>https://github.com/deepcitizen/multithread-yauaa</url>
 
   <properties>
     <Automatic-Module-Name>nl.basjes.parse.useragent</Automatic-Module-Name>
@@ -266,21 +266,22 @@
             </filter>
           </filters>
           <relocations>
+            <!-- The shaded classes are in the java package of this library (nl.basjes.parse.useragent), not in the maven groupId. -->
             <relocation>
               <pattern>org.antlr</pattern>
-              <shadedPattern>${project.groupId}.${project.artifactId}.shaded.org.antlr</shadedPattern>
+              <shadedPattern>nl.basjes.parse.useragent.${project.artifactId}.shaded.org.antlr</shadedPattern>
             </relocation>
             <relocation>
               <pattern>org.yaml.snakeyaml</pattern>
-              <shadedPattern>${project.groupId}.${project.artifactId}.shaded.org.yaml.snakeyaml</shadedPattern>
+              <shadedPattern>nl.basjes.parse.useragent.${project.artifactId}.shaded.org.yaml.snakeyaml</shadedPattern>
             </relocation>
             <relocation>
               <pattern>org.apache.commons.text</pattern>
-              <shadedPattern>${project.groupId}.${project.artifactId}.shaded.org.apache.commons.text</shadedPattern>
+              <shadedPattern>nl.basjes.parse.useragent.${project.artifactId}.shaded.org.apache.commons.text</shadedPattern>
             </relocation>
             <relocation>
               <pattern>org.apache.commons.lang3</pattern>
-              <shadedPattern>${project.groupId}.${project.artifactId}.shaded.org.apache.commons.lang3</shadedPattern>
+              <shadedPattern>nl.basjes.parse.useragent.${project.artifactId}.shaded.org.apache.commons.lang3</shadedPattern>
             </relocation>
           </relocations>
           <artifactSet>
@@ -813,11 +814,19 @@
       </roles>
       <timezone>Europe/Amsterdam</timezone>
     </developer>
+    <developer>
+      <id>deepcitizen</id>
+      <name>deepcitizen</name>
+      <url>https://github.com/deepcitizen</url>
+      <roles>
+        <role>Maintainer of this fork</role>
+      </roles>
+    </developer>
   </developers>
 
   <scm>
-    <url>https://github.com/nielsbasjes/yauaa</url>
-    <connection>scm:git:https://github.com/nielsbasjes/yauaa.git</connection>
+    <url>https://github.com/deepcitizen/multithread-yauaa</url>
+    <connection>scm:git:https://github.com/deepcitizen/multithread-yauaa.git</connection>
     <developerConnection>scm:git:file:///${project.basedir}</developerConnection>
     <tag>HEAD</tag>
   </scm>

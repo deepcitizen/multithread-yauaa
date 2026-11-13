@@ -20,7 +20,7 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>nl.basjes.parse.useragent</groupId>
+    <groupId>io.github.deepcitizen</groupId>
     <artifactId>yauaa-nifi-parent</artifactId>
     <version>8.3.1-SNAPSHOT</version>
   </parent>
@@ -31,7 +31,7 @@
 
   <dependencies>
     <dependency>
-      <groupId>nl.basjes.parse.useragent</groupId>
+      <groupId>io.github.deepcitizen</groupId>
       <artifactId>yauaa</artifactId>
     </dependency>
 

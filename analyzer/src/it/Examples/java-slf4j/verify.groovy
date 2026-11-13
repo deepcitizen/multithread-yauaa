@@ -19,7 +19,7 @@ File buildLog = new File( basedir, 'build.log' )
 assert buildLog.exists()
 
 assert 1 <= buildLog.getText().count("YauaaVersion")
-assert 1 == buildLog.getText().count("For more information: https://yauaa.basjes.nl")
+assert 1 == buildLog.getText().count("For more information: https://github.com/deepcitizen/multithread-yauaa")
 assert 1 == buildLog.getText().count("using expression: classpath*:UserAgents/")
 assert 1 == buildLog.getText().count("Building all matchers for all possible fields.")
 assert 1 == buildLog.getText().count("Preheating JVM by running ")

@@ -19,7 +19,7 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>nl.basjes.parse.useragent</groupId>
+    <groupId>io.github.deepcitizen</groupId>
     <artifactId>yauaa-example-parent-it</artifactId>
     <version>0.0.1</version>
     <relativePath>../pom.xml</relativePath>
@@ -72,7 +72,7 @@
     </dependency>
 
     <dependency>
-      <groupId>nl.basjes.parse.useragent</groupId>
+      <groupId>io.github.deepcitizen</groupId>
       <artifactId>yauaa</artifactId>
       <version>${yauaa.version}</version>
     </dependency>

@@ -20,7 +20,7 @@
 
   <parent>
     <artifactId>yauaa-parent</artifactId>
-    <groupId>nl.basjes.parse.useragent</groupId>
+    <groupId>io.github.deepcitizen</groupId>
     <version>8.3.1-SNAPSHOT</version>
   </parent>
   <artifactId>yauaa-benchmark</artifactId>
@@ -81,7 +81,7 @@
     <!-- But they do need them for the compilation and testing ... -->
     <!-- Documentation of the used shading construct: https://yauaa.basjes.nl/NOTES-shading-dependencies.html -->
     <dependency>
-      <groupId>nl.basjes.parse.useragent</groupId>
+      <groupId>io.github.deepcitizen</groupId>
       <artifactId>yauaa</artifactId>
       <version>${yauaa.version}</version>
       <exclusions>
