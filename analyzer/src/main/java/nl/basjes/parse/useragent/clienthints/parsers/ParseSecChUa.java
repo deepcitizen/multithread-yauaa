@@ -33,7 +33,8 @@ public class ParseSecChUa implements CHParser {
     public static final String HEADER_SPEC          = "The Sec-CH-UA request header field gives a server information about a user agent's branding and version.";
     public static final String FIELD_NAME           = "secChUa";
 
-    private transient Map<String, ArrayList<Brand>> cache = null;
+    // Volatile: The cache can be replaced while other threads are parsing.
+    private transient volatile Map<String, ArrayList<Brand>> cache = null;
 
     public ParseSecChUa() {
         // Nothing to do right now
@@ -88,11 +89,17 @@ public class ParseSecChUa implements CHParser {
         // " Not A;Brand";v="99", "Chromium";v="99", "Google Chrome";v="99"
 
         ArrayList<Brand> brands;
+        Map<String, ArrayList<Brand>> brandsCache = cache;
         // Do we even have a cache?
-        if (cache == null) {
+        if (brandsCache == null) {
             brands = BrandListParser.parse(input);
         } else {
-            brands = cache.computeIfAbsent(input, value -> BrandListParser.parse(input));
+            // NOTE: No computeIfAbsent to avoid blocking other threads while parsing.
+            brands = brandsCache.get(input);
+            if (brands == null) {
+                brands = BrandListParser.parse(input);
+                brandsCache.put(input, brands);
+            }
         }
 
         if (!brands.isEmpty()) {

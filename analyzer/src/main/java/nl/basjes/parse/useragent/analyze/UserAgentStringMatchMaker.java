@@ -39,6 +39,7 @@ import nl.basjes.parse.useragent.config.AnalyzerConfig;
 import nl.basjes.parse.useragent.config.AnalyzerConfigHolder;
 import nl.basjes.parse.useragent.config.ConfigLoader;
 import nl.basjes.parse.useragent.config.MatcherConfig;
+import nl.basjes.parse.useragent.parse.UserAgentTooDeeplyNestedException;
 import nl.basjes.parse.useragent.parse.UserAgentTreeFlattener;
 import nl.basjes.parse.useragent.utils.KryoConfig;
 import org.antlr.v4.runtime.tree.ParseTree;
@@ -46,6 +47,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
+
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -59,6 +62,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 import static nl.basjes.parse.useragent.UserAgent.AGENT_CLASS;
 import static nl.basjes.parse.useragent.UserAgent.AGENT_NAME;
@@ -97,6 +101,14 @@ import static nl.basjes.parse.useragent.UserAgent.WEBVIEW_APP_VERSION_MAJOR;
 import static nl.basjes.parse.useragent.clienthints.ClientHintsAnalyzer.extraDependenciesNeededByClientCalculator;
 import static nl.basjes.parse.useragent.utils.YauaaVersion.logVersion;
 
+/**
+ * The core of the analyzer: It holds all the rules and does the actual analysis of a useragent.
+ * <p>
+ * This class is threadsafe and the parse method is NOT synchronized: Any number of threads can parse at the same time
+ * using a single instance. All rules (matchers, actions, lookups and hashmaps) are immutable after the initialization
+ * and all mutable state of a single parse is held in a {@link ParseState} which is taken from (and returned to) a small
+ * lock free pool.
+ */
 @DefaultSerializer(UserAgentStringMatchMaker.KryoSerializer.class)
 public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHolder, Serializable {
     // We set this to 1000000 always.
@@ -113,8 +125,16 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
         return allMatchers;
     }
 
+    /**
+     * Only intended for debugging and testing in a single threaded situation.
+     * @return The matchers that received input during the most recent parse.
+     */
     public MatcherList getTouchedMatchers() {
-        return touchedMatchers;
+        ParseState state = getDebugParseState();
+        if (state == null) {
+            return new MatcherList(1);
+        }
+        return state.getTouchedMatchers();
     }
 
     private final Map<String, Set<MatcherAction>> informMatcherActions = new LinkedHashMap<>(INFORM_ACTIONS_HASHMAP_CAPACITY);
@@ -156,7 +176,11 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
      * Initialize the transient default values
      */
     void initTransientFields() {
-        touchedMatchers = new MatcherList(32);
+        // All runtime structures are (re)created (just in time) by initializeMatchers()
+        runtimeIsReady = false;
+        parseStatePool = null;
+        parseStatePoolSlots = 0;
+        keyValuePaths = Collections.emptySet();
     }
 
     private void readObject(java.io.ObjectInputStream stream)
@@ -240,6 +264,10 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
         flattener.clear();
 
         invalidateCaches();
+
+        parseStatePool = null;
+        parseStatePoolSlots = 0;
+        keyValuePaths = Collections.emptySet();
     }
 
     private void invalidateCaches(){
@@ -328,36 +356,188 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
         throw new InvalidParserConfigurationException("We cannot provide these fields:" + impossibleFields);
     }
 
-    private boolean matchersHaveBeenInitialized = false;
-    public synchronized void initializeMatchers() {
-        if (matchersHaveBeenInitialized) {
+    private volatile boolean matchersHaveBeenInitialized = false;
+
+    // ---------------------------------------------------------------------------------------
+    // The runtime structures that are derived from the (initialized) matchers.
+    // These are transient: After deserialization they are recreated just in time.
+
+    // Set to true (last) when everything is ready to parse.
+    private transient volatile boolean runtimeIsReady = false;
+
+    // The total number of actions that can receive input.
+    private transient int numberOfActions = 0;
+
+    // The (lowercase) paths for which there is at least one 'path="value"' entry in the informMatcherActions.
+    private transient Set<String> keyValuePaths = Collections.emptySet();
+
+    // The pool of reusable ParseState instances.
+    // Each slot is on its own cache line(s) to avoid false sharing between threads.
+    // Slot n is at index (n + 1) * POOL_SLOT_PADDING: The first cache line(s) of the array also hold the array header.
+    // The last slot holds the state of the most recent parse which is ONLY used for debugging/testing (single threaded).
+    private transient AtomicReferenceArray<ParseState> parseStatePool = null;
+    private transient int parseStatePoolSlots = 0;
+    private static final int POOL_SLOT_PADDING = 16;
+
+    /**
+     * Initialize all internal datastructures so the analyzer is ready to parse.
+     * This is done automatically (just in time) by the first parse.
+     * After the initialization this method is very cheap and lock free.
+     */
+    public void initializeMatchers() {
+        if (runtimeIsReady) {
             return;
         }
-        LOG.info("Initializing Analyzer data structures");
+        initializeMatchersSynchronized();
+    }
 
-        if (allMatchers.isEmpty()) {
-            throw new InvalidParserConfigurationException("No matchers were loaded at all.");
+    private synchronized void initializeMatchersSynchronized() {
+        if (runtimeIsReady) {
+            return;
+        }
+        if (!matchersHaveBeenInitialized) {
+            LOG.info("Initializing Analyzer data structures");
+
+            if (allMatchers.isEmpty()) {
+                throw new InvalidParserConfigurationException("No matchers were loaded at all.");
+            }
+
+            long start = System.nanoTime();
+            allMatchers.forEach(Matcher::initialize);
+            // No more changes: Replace all sets with a compact (array based) version which retains the order.
+            informMatcherActions.replaceAll((key, actions) -> new MatcherActionSet(actions));
+            long stop = System.nanoTime();
+
+            LOG.info("Built in {} msec : Hashmap {}, Ranges map:{}",
+                (stop - start) / 1000000,
+                informMatcherActions.size(),
+                informMatcherActionRanges.size());
+
+            for (Matcher matcher: allMatchers) {
+                if (matcher.getActionsThatRequireInput() == 0) {
+                    zeroInputMatchers.add(matcher);
+                }
+            }
+            matchersHaveBeenInitialized = true;
         }
 
-        long start = System.nanoTime();
-        allMatchers.forEach(Matcher::initialize);
-        long stop = System.nanoTime();
+        buildRuntimeStructures();
+        runtimeIsReady = true;
+    }
 
-        matchersHaveBeenInitialized = true;
-        LOG.info("Built in {} msec : Hashmap {}, Ranges map:{}",
-            (stop - start) / 1000000,
-            informMatcherActions.size(),
-            informMatcherActionRanges.size());
+    /**
+     * Builds all (transient) structures that are needed to do the actual parsing.
+     */
+    private void buildRuntimeStructures() {
+        int actionIndex = 0;
+        for (int matcherIndex = 0; matcherIndex < allMatchers.size(); matcherIndex++) {
+            actionIndex = allMatchers.get(matcherIndex).initializeRuntime(matcherIndex, actionIndex);
+        }
+        numberOfActions = actionIndex;
 
-        for (Matcher matcher: allMatchers) {
-            if (matcher.getActionsThatRequireInput() == 0) {
-                zeroInputMatchers.add(matcher);
+        Set<String> newKeyValuePaths = new HashSet<>();
+        for (Map.Entry<String, Set<MatcherAction>> entry : informMatcherActions.entrySet()) {
+            for (MatcherAction matcherAction : entry.getValue()) {
+                if (matcherAction.getActionIndex() < 0) {
+                    throw new IllegalStateException("Found an action that cannot hold any state: " + matcherAction);
+                }
+            }
+            String key = entry.getKey();
+            int keyValueSeparator = key.indexOf("=\"");
+            if (keyValueSeparator >= 0) {
+                newKeyValuePaths.add(key.substring(0, keyValueSeparator));
             }
         }
+        keyValuePaths = newKeyValuePaths;
 
-        // Reset all Matchers
-        for (Matcher matcher : allMatchers) {
-            matcher.reset();
+        int poolSlots = Integer.highestOneBit(Math.max(8, Runtime.getRuntime().availableProcessors() * 2) - 1) << 1;
+        parseStatePoolSlots = poolSlots;
+        parseStatePool = new AtomicReferenceArray<>((poolSlots + 2) * POOL_SLOT_PADDING);
+    }
+
+    private static int poolSlotIndex(int slot) {
+        return (slot + 1) * POOL_SLOT_PADDING;
+    }
+
+    private static int poolDebugSlotIndex(int slots) {
+        return (slots + 1) * POOL_SLOT_PADDING;
+    }
+
+    @NonNull
+    private ParseState newParseState() {
+        return new ParseState(this, allMatchers.size(), numberOfActions);
+    }
+
+    private static int poolProbe() {
+        int hash = System.identityHashCode(Thread.currentThread());
+        return hash ^ (hash >>> 16);
+    }
+
+    /**
+     * Get a ParseState for exclusive use by the current thread.
+     * @return A ParseState from the pool (or a new one if the pool is empty).
+     */
+    @NonNull
+    private ParseState acquireParseState() {
+        AtomicReferenceArray<ParseState> pool = parseStatePool;
+        if (pool != null) {
+            int slots = parseStatePoolSlots;
+            int start = poolProbe();
+            for (int i = 0; i < slots; i++) {
+                int index = poolSlotIndex((start + i) & (slots - 1));
+                ParseState state = pool.get(index);
+                if (state != null && pool.compareAndSet(index, state, null)) {
+                    return state;
+                }
+            }
+        }
+        return newParseState();
+    }
+
+    /**
+     * Return a ParseState to the pool for later reuse (by any thread).
+     * @param state The state that is no longer used by the current thread.
+     */
+    private void releaseParseState(@NonNull ParseState state) {
+        AtomicReferenceArray<ParseState> pool = parseStatePool;
+        if (pool == null) {
+            return;
+        }
+        int slots = parseStatePoolSlots;
+
+        // Retain the most recent state (only for debugging). Avoid needless writes to this shared slot.
+        int debugSlotIndex = poolDebugSlotIndex(slots);
+        if (pool.get(debugSlotIndex) != state) {
+            pool.lazySet(debugSlotIndex, state);
+        }
+
+        int start = poolProbe();
+        for (int i = 0; i < slots; i++) {
+            int index = poolSlotIndex((start + i) & (slots - 1));
+            if (pool.get(index) == null && pool.compareAndSet(index, null, state)) {
+                return;
+            }
+        }
+        // The pool is full: Simply drop this one.
+    }
+
+    /**
+     * Only intended for debugging and testing in a single threaded situation.
+     * @return The state of the most recent parse (null if not available).
+     */
+    @Override
+    public ParseState getDebugParseState() {
+        AtomicReferenceArray<ParseState> pool = parseStatePool;
+        if (pool == null) {
+            return null;
+        }
+        return pool.get(poolDebugSlotIndex(parseStatePoolSlots));
+    }
+
+    private void setDebugParseState(@Nullable ParseState state) {
+        AtomicReferenceArray<ParseState> pool = parseStatePool;
+        if (pool != null) {
+            pool.set(poolDebugSlotIndex(parseStatePoolSlots), state);
         }
     }
 
@@ -466,7 +646,7 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
         analyzerSet.add(matcherAction);
     }
 
-    private boolean verbose = false;
+    private volatile boolean verbose = false;
 
     public synchronized void setVerbose(boolean newVerbose) {
         this.verbose = newVerbose;
@@ -499,36 +679,20 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
         userAgent.set(REMARKABLE_PATTERN,           "Hacker",  confidence);
     }
 
-    private transient MatcherList touchedMatchers = new MatcherList(32);
-
-    @Override
-    public void receivedInput(Matcher matcher) {
-        if (zeroInputMatchers.contains(matcher)) {
-            return;
-        }
-        touchedMatchers.add(matcher);
-    }
-
     /**
      * Resets the state of the Analyzer to the default state.
+     * As all state of a parse is held in a ParseState this only forgets the state of the most recent parse
+     * (which is only retained for debugging purposes).
      */
     public synchronized void reset() {
-        // Reset all Matchers
-        for (Matcher matcher : touchedMatchers) {
-            matcher.reset();
-        }
-        touchedMatchers.clear();
-
-        for (Matcher matcher : zeroInputMatchers) {
-            matcher.reset();
-        }
+        setDebugParseState(null);
     }
 
     /**
      * Parses and analyzes the useragent string provided in the MutableUserAgent instance.
-     * NOTE: This method is internally synchronized because the way the analyzer works is not reentrant.
+     * NOTE: This method is threadsafe and NOT synchronized: many threads can parse at the same time.
      * @param userAgent The MutableUserAgent instance that is to be parsed and that gets all results
-     * @return An ImmutableUserAgent copy of the results that is suitable for further usage and caching.
+     * @return The provided MutableUserAgent with all results.
      */
     @NonNull
     public MutableUserAgent parse(MutableUserAgent userAgent) {
@@ -540,46 +704,51 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
             return userAgent;
         }
 
-        synchronized (this) {
-            // Reset all Matchers
-            reset();
+        // NOTE: If an Error (like OutOfMemoryError) occurs the state is not put back in the pool.
+        ParseState state = acquireParseState();
+        boolean verboseParse = verbose;
+        state.startParse(userAgent.isDebug(), verboseParse);
 
-            if (userAgent.isDebug()) {
-                for (Matcher matcher : allMatchers) {
-                    matcher.setVerboseTemporarily(true);
+        try {
+            userAgent = flattener.parse(userAgent, state);
+
+            inform(state, SYNTAX_ERROR, userAgent.getValue(SYNTAX_ERROR), null);
+
+            if (verboseParse) {
+                LOG.info("=========== Checking all Touched Matchers: {}", state.getTouchedMatchersSize());
+            }
+            // Fire all Analyzers with any input
+            for (int i = 0; i < state.getTouchedMatchersSize(); i++) {
+                Matcher matcher = state.getTouchedMatcher(i);
+                if (matcher != null) {
+                    matcher.analyze(state, userAgent);
                 }
             }
 
-            try {
-                userAgent = flattener.parse(userAgent);
-
-                inform(SYNTAX_ERROR, userAgent.getValue(SYNTAX_ERROR), null);
-
-                if (verbose) {
-                    LOG.info("=========== Checking all Touched Matchers: {}", touchedMatchers.size());
-                }
-                // Fire all Analyzers with any input
-                for (Matcher matcher : touchedMatchers) {
-                    matcher.analyze(userAgent);
-                }
-
-                if (verbose) {
-                    LOG.info("=========== Checking all Zero Input Matchers: {}", zeroInputMatchers.size());
-                }
-                // Fire all Analyzers that should not get input
-                for (Matcher matcher : zeroInputMatchers) {
-                    matcher.analyze(userAgent);
-                }
-
-                userAgent.processSetAll();
-            } catch (RuntimeException rte) {
-                // If this occurs then someone has found a previously undetected problem.
-                // So this is a safety for something that 'can' but 'should not' occur.
-                userAgent.reset();
-                setAsHacker(userAgent, 10000);
-                userAgent.setForced(HACKER_ATTACK_VECTOR, "Yauaa Exploit", 10000);
+            if (verboseParse) {
+                LOG.info("=========== Checking all Zero Input Matchers: {}", zeroInputMatchers.size());
             }
+            // Fire all Analyzers that should not get input
+            for (Matcher matcher : zeroInputMatchers) {
+                matcher.analyze(state, userAgent);
+            }
+
+            userAgent.processSetAll();
+        } catch (UserAgentTooDeeplyNestedException tooDeeplyNested) {
+            // Parsing this useragent could overflow the stack.
+            // Just like a useragent that is too long this is a hacker trying to break the system.
+            userAgent.reset();
+            setAsHacker(userAgent, 100);
+            userAgent.setForced(HACKER_ATTACK_VECTOR, "Stack overflow", 100);
+        } catch (RuntimeException rte) {
+            // If this occurs then someone has found a previously undetected problem.
+            // So this is a safety for something that 'can' but 'should not' occur.
+            userAgent.reset();
+            setAsHacker(userAgent, 10000);
+            userAgent.setForced(HACKER_ATTACK_VECTOR, "Yauaa Exploit", 10000);
         }
+
+        releaseParseState(state);
         return userAgent;
     }
 
@@ -615,8 +784,9 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
         }
 
         // Calculate all fields that are constructed from the found ones.
+        boolean verboseParse = verbose;
         for (FieldCalculator fieldCalculator: fieldCalculators) {
-            if (verbose) {
+            if (verboseParse) {
                 LOG.info("Running FieldCalculator: {}", fieldCalculator);
             }
             fieldCalculator.calculate(userAgent);
@@ -626,27 +796,69 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
     }
 
     public Set<Range> getRequiredInformRanges(String treeName) {
-        return informMatcherActionRanges.computeIfAbsent(treeName, k -> Collections.emptySet());
+        // NOTE: This is called during parsing (by many threads at the same time) so this must be read only.
+        return informMatcherActionRanges.getOrDefault(treeName, Collections.emptySet());
     }
 
+    /**
+     * Only intended for debugging and testing: Informs the state of the most recent parse.
+     * During normal parsing all informs go directly into the ParseState of that parse.
+     * @param key The path
+     * @param value The value
+     * @param ctx The node in the parse tree
+     */
+    @Override
     public void inform(String key, String value, ParseTree ctx) {
-        inform(key, key, value, ctx);
-        inform(key + "=\"" + value + '"', key, value, ctx);
+        initializeMatchers();
+        ParseState state = getDebugParseState();
+        if (state == null) {
+            state = newParseState();
+            state.startParse(false, verbose);
+            setDebugParseState(state);
+        }
+        inform(state, key, value, ctx);
+    }
+
+    /**
+     * Find all actions that are interested in this path/value combination and give them the information.
+     * This is the hottest code path of the entire analyzer.
+     * @param state The state of the current parse
+     * @param key The path
+     * @param value The value
+     * @param ctx The node in the parse tree
+     */
+    void inform(@NonNull ParseState state, @NonNull String key, @NonNull String value, @Nullable ParseTree ctx) {
+        boolean verboseParse = state.isVerbose();
+        // The keys are (almost) always already lowercase in which case no new String is created.
+        String lowerKey = key.toLowerCase(Locale.ROOT);
+        inform(state, verboseParse, key, lowerKey, key, value, ctx);
+
+        // Only create (and look up) the 'key="value"' combination if any rule has such an entry for this key.
+        // A path never contains '="' so if the combination exists the lowercase key is in the keyValuePaths.
+        if (keyValuePaths.contains(lowerKey)) {
+            String match = key + "=\"" + value + '"';
+            inform(state, verboseParse, match, match.toLowerCase(Locale.ROOT), key, value, ctx);
+        } else {
+            if (verboseParse) {
+                LOG.info("--- Have (0): {}", key + "=\"" + value + '"');
+            }
+        }
 
         Set<Integer> lengths = getRequiredPrefixLengths(key);
         if (lengths != null) {
             int valueLength = value.length();
             for (Integer prefixLength : lengths) {
                 if (valueLength >= prefixLength) {
-                    inform(key + "{\"" + firstCharactersForPrefixHash(value, prefixLength) + '"', key, value, ctx);
+                    String match = key + "{\"" + firstCharactersForPrefixHash(value, prefixLength) + '"';
+                    inform(state, verboseParse, match, match.toLowerCase(Locale.ROOT), key, value, ctx);
                 }
             }
         }
     }
 
-    private void inform(String match, String key, String value, ParseTree ctx) {
-        Set<MatcherAction> relevantActions = informMatcherActions.get(match.toLowerCase(Locale.ROOT));
-        if (verbose) {
+    private void inform(ParseState state, boolean verboseParse, String match, String lowerMatch, String key, String value, ParseTree ctx) {
+        Set<MatcherAction> relevantActions = informMatcherActions.get(lowerMatch);
+        if (verboseParse) {
             if (relevantActions == null) {
                 LOG.info("--- Have (0): {}", match);
             } else {
@@ -661,8 +873,15 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
         }
 
         if (relevantActions != null) {
-            for (MatcherAction matcherAction : relevantActions) {
-                matcherAction.inform(key, value, ctx);
+            if (relevantActions instanceof MatcherActionSet) {
+                // The normal case: Iterate without creating an Iterator.
+                for (MatcherAction matcherAction : ((MatcherActionSet) relevantActions).getActions()) {
+                    matcherAction.inform(state, key, value, ctx);
+                }
+            } else {
+                for (MatcherAction matcherAction : relevantActions) {
+                    matcherAction.inform(state, key, value, ctx);
+                }
             }
         }
     }
@@ -774,26 +993,30 @@ public class UserAgentStringMatchMaker implements MatchMaker, AnalyzerConfigHold
      * @return The list of Matches that were possibly relevant.
      */
     public List<MatchesList.Match> getMatches() {
+        ParseState state = getDebugParseState();
         List<MatchesList.Match> allMatches = new ArrayList<>(128);
         for (Matcher matcher: getAllMatchers()) {
-            allMatches.addAll(matcher.getMatches());
+            allMatches.addAll(matcher.getMatches(state));
         }
         return allMatches;
     }
 
     public synchronized List<MatchesList.Match> getUsedMatches(MutableUserAgent userAgent) {
-        // Reset all Matchers
-        for (Matcher matcher : getAllMatchers()) {
-            matcher.reset();
-            matcher.setVerboseTemporarily(false);
-        }
+        initializeMatchers();
+        ParseState state = acquireParseState();
+        state.startParse(false, verbose);
 
-        flattener.parse(userAgent);
+        try {
+            flattener.parse(userAgent, state);
+        } catch (UserAgentTooDeeplyNestedException tooDeeplyNested) {
+            // Nothing was parsed so nothing matched.
+        }
 
         List<MatchesList.Match> allMatches = new ArrayList<>(128);
         for (Matcher matcher: getAllMatchers()) {
-            allMatches.addAll(matcher.getUsedMatches());
+            allMatches.addAll(matcher.getUsedMatches(state));
         }
+        releaseParseState(state);
         return allMatches;
     }
 

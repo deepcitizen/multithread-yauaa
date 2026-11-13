@@ -43,6 +43,14 @@ public interface MatchMaker extends AnalyzerConfigHolder {
         // Nothing to do
     }
 
+    /**
+     * Only intended for debugging and testing in a single threaded situation.
+     * @return The state of the most recent parse (null if not available).
+     */
+    default ParseState getDebugParseState() {
+        return null;
+    }
+
     class Dummy implements MatchMaker {
         @Override
         public void inform(String path, String value, ParseTree ctx) {

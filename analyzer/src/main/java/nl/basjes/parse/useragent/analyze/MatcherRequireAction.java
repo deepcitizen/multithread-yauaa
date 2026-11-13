@@ -22,6 +22,8 @@ import nl.basjes.parse.useragent.parser.UserAgentTreeWalkerParser;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 @SuppressWarnings("this-escape")
 public class MatcherRequireAction extends MatcherAction {
@@ -51,12 +53,10 @@ public class MatcherRequireAction extends MatcherAction {
                 "It is useless to put a fixed value \"" + fixedValue + "\" in the require section.");
     }
 
-    private boolean foundRequiredValue = false;
-
     @Override
-    public void inform(String key, WalkResult foundValue) {
-        foundRequiredValue = true;
-        if (verbose) {
+    protected void inform(@NonNull ParseState state, @Nullable String key, @NonNull WalkResult foundValue) {
+        state.setFoundValue(this, Boolean.TRUE); // The required value was found
+        if (isVerbose(state)) {
             LOG.info("Info REQUIRE: {}", key);
             LOG.info("NEED REQUIRE: {}", getMatchExpression());
             LOG.info("KEPT REQUIRE: {}", key);
@@ -64,15 +64,9 @@ public class MatcherRequireAction extends MatcherAction {
     }
 
     @Override
-    public boolean obtainResult() {
-        processInformedMatches();
-        return foundRequiredValue;
-    }
-
-    @Override
-    public void reset() {
-        super.reset();
-        foundRequiredValue = false;
+    boolean obtainResult(@NonNull ParseState state) {
+        processInformedMatches(state);
+        return state.getFoundValue(this) != null;
     }
 
     @Override

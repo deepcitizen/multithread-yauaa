@@ -60,6 +60,8 @@ import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.io.Serializable;
 import java.util.HashMap;
@@ -80,6 +82,13 @@ import static nl.basjes.parse.useragent.parser.UserAgentTreeWalkerParser.StepNot
 import static nl.basjes.parse.useragent.parser.UserAgentTreeWalkerParser.StepStartsWithValueContext;
 import static nl.basjes.parse.useragent.utils.AntlrUtils.NULL_PARSE_TREE;
 
+/**
+ * A single action (variable, require, failIfFound or extract) of a {@link Matcher}.
+ * <p>
+ * After initialization a MatcherAction is immutable and can be shared by many threads at the same time.
+ * All state that changes during the analysis of a single useragent (the matches and the found value)
+ * is kept in the {@link ParseState}.
+ */
 public abstract class MatcherAction implements Serializable {
 
     private String matchExpression;
@@ -92,11 +101,34 @@ public abstract class MatcherAction implements Serializable {
     private static final Logger LOG = LogManager.getLogger(MatcherAction.class);
 
     protected Matcher matcher;
-    private MatchesList matches;
     protected boolean mustHaveMatches = false;
+
+    // The index of this action in the MatchMaker (used to find the state in a ParseState).
+    // Transient because it is (re)assigned by the MatchMaker after initialization or deserialization.
+    private transient int actionIndex = -1;
+    // Copies of the runtime information of the matcher of this action.
+    // Retained here so the hot code path does not need to access the (much larger) Matcher object.
+    private transient int matcherIndex = -1;
+    private transient boolean matcherIsZeroInput = false;
 
     boolean mustHaveMatches() {
         return mustHaveMatches;
+    }
+
+    int getActionIndex() {
+        return actionIndex;
+    }
+
+    /**
+     * Sets the runtime information (done by the Matcher after initialization or deserialization).
+     * @param newActionIndex The index of this action in the MatchMaker
+     * @param newMatcherIndex The index of the Matcher of this action in the MatchMaker
+     * @param newMatcherIsZeroInput Is the Matcher of this action a matcher that does not need any input
+     */
+    void initializeRuntime(int newActionIndex, int newMatcherIndex, boolean newMatcherIsZeroInput) {
+        actionIndex = newActionIndex;
+        matcherIndex = newMatcherIndex;
+        matcherIsZeroInput = newMatcherIsZeroInput;
     }
 
     public void destroy() {
@@ -105,20 +137,32 @@ public abstract class MatcherAction implements Serializable {
         }
     }
 
+    // The permanent verbose setting (from the matcher config).
     boolean verbose = false;
-    private boolean verbosePermanent = false;
-    private boolean verboseTemporary = false;
 
     private void setVerbose(boolean newVerbose) {
         setVerbose(newVerbose, false);
     }
 
+    /**
+     * Change the verbose setting of this action.
+     * A temporary verbose setting is no longer stored in the action (that would not be threadsafe);
+     * it is part of the parse instead (see {@link nl.basjes.parse.useragent.UserAgent.MutableUserAgent#setDebug(boolean)}).
+     * @param newVerbose The new verbose value
+     * @param temporary If true this call is ignored.
+     */
     public final void setVerbose(boolean newVerbose, boolean temporary) {
-        this.verbose = newVerbose;
         if (!temporary) {
-            this.verbosePermanent = newVerbose;
+            this.verbose = newVerbose;
         }
-        this.verboseTemporary = temporary;
+    }
+
+    /**
+     * @param state The state of the current parse.
+     * @return Must this action output verbose logging in the current parse.
+     */
+    final boolean isVerbose(@NonNull ParseState state) {
+        return verbose || state.isDebug();
     }
 
     public String getMatchExpression() {
@@ -176,7 +220,6 @@ public abstract class MatcherAction implements Serializable {
         if (fixedValue != null) {
             setFixedValue(fixedValue);
             mustHaveMatches = false;
-            matches = new MatchesList(0);
             return 0; // Not interested in any patterns
         }
 
@@ -194,11 +237,6 @@ public abstract class MatcherAction implements Serializable {
             mustHaveMatches = false;
         }
 
-        int listSize = 0;
-        if (informs > 0) {
-            listSize = 1;
-        }
-        this.matches = new MatchesList(listSize);
         return informs;
     }
 
@@ -312,59 +350,67 @@ public abstract class MatcherAction implements Serializable {
      * For each key that this action wants to be notified for this method is called.
      * Note that on a single parse event the same name CAN be called multiple times!!
      *
+     * @param state  The state of the current parse
      * @param key    The key of the node
      * @param value  The value that was found
      * @param result The node in the parser tree where the match occurred
      */
-    public void inform(String key, String value, ParseTree result) {
-        matcher.receivedInput();
-
-        // Only if this needs input we tell the matcher on the first one.
-        if (mustHaveMatches && matches.isEmpty()) {
-            matcher.gotMyFirstStartingPoint();
+    void inform(@NonNull ParseState state, @Nullable String key, @Nullable String value, @Nullable ParseTree result) {
+        // The matcher received input. The first time we record that the matcher needs to be evaluated.
+        if (state.markReceivedInput(matcherIndex) && !matcherIsZeroInput) {
+            state.addTouchedMatcher(matcher);
         }
-        matches.add(key, value, result);
+
+        boolean isFirstMatch = state.addMatch(this, key, value, result);
+        // Only if this needs input we tell the matcher on the first one.
+        if (mustHaveMatches && isFirstMatch) {
+            state.incrementReceivedInput(matcherIndex);
+        }
     }
 
-    protected abstract void inform(String key, WalkResult foundValue);
+    protected abstract void inform(@NonNull ParseState state, @Nullable String key, @NonNull WalkResult foundValue);
 
     /**
+     * @param state The state of the current parse
      * @return If it is impossible that this can be valid it returns true, else false.
      */
-    boolean cannotBeValid() {
+    boolean cannotBeValid(@NonNull ParseState state) {
         if (mustHaveMatches) {
-            return matches.isEmpty();
+            return !state.hasMatches(this);
         }
         return false;
     }
 
     /**
      * Called after all nodes have been notified.
+     * @param state The state of the current parse
      * @return true if the obtainResult result was valid. False will fail the entire matcher this belongs to.
      */
-    public abstract boolean obtainResult();
+    abstract boolean obtainResult(@NonNull ParseState state);
 
-    boolean isValidWithoutMatches() {
-        return matches.isEmpty() && !evaluator.mustHaveMatches();
+    boolean isValidWithoutMatches(@NonNull ParseState state) {
+        return !state.hasMatches(this) && !evaluator.mustHaveMatches();
     }
 
     /**
      * Optimization: Only if there is a possibility that all actions for this matcher CAN be valid do we
      * actually perform the analysis and do the (expensive) tree walking and matching.
+     * @param state The state of the current parse
      */
-    void processInformedMatches() {
-        for (MatchesList.Match match : matches) {
-            WalkResult matchedValue = evaluator.evaluate(match.getResult(), match.getKey(), match.getValue());
+    void processInformedMatches(@NonNull ParseState state) {
+        for (int match = state.firstMatch(this); match != -1; match = state.nextMatch(match)) {
+            String     matchKey     = state.getMatchKey(match);
+            WalkResult matchedValue = evaluator.evaluate(state.getMatchTree(match), matchKey, state.getMatchValue(match));
             if (matchedValue != null) {
-                inform(match.getKey(), matchedValue);
+                inform(state, matchKey, matchedValue);
                 return; // We always stick to the first match
             }
         }
 
-        if (isValidWithoutMatches()) {
+        if (isValidWithoutMatches(state)) {
             WalkResult matchedValue = evaluator.evaluate(NULL_PARSE_TREE, null, null);
             if (matchedValue != null) {
-                inform(null, matchedValue);
+                inform(state, null, matchedValue);
             }
         }
     }
@@ -502,15 +548,27 @@ public abstract class MatcherAction implements Serializable {
 
     // ============================================================================================================
 
+    /**
+     * There is no state to reset anymore (it is all in the ParseState).
+     */
     public void reset() {
-        matches.clear();
-        if (verboseTemporary) {
-            verbose = verbosePermanent;
-        }
+        // Nothing to do: All state is held in the ParseState of each parse.
     }
 
+    /**
+     * Debugging only: The matches found for this action during the most recent parse.
+     * @return A copy of the list of matches.
+     */
     public MatchesList getMatches() {
-        return matches;
+        return getMatches(matcher == null ? null : matcher.getDebugParseState());
+    }
+
+    @NonNull
+    MatchesList getMatches(@Nullable ParseState state) {
+        if (state == null) {
+            return new MatchesList(0);
+        }
+        return state.getMatches(this);
     }
 
     @Override
@@ -519,11 +577,8 @@ public abstract class MatcherAction implements Serializable {
             "matchExpression='" + matchExpression + '\'' +
             ", evaluator=" + evaluator +
 //            ", matcher=" + matcher +
-            ", matches=" + matches +
             ", mustHaveMatches=" + mustHaveMatches +
             ", verbose=" + verbose +
-            ", verbosePermanent=" + verbosePermanent +
-            ", verboseTemporary=" + verboseTemporary +
             '}';
     }
 }

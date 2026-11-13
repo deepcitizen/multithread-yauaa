@@ -126,6 +126,13 @@ public interface AgentField extends Serializable {
             return value;
         }
 
+        /**
+         * @return The value exactly as it was set (i.e. null if no value has been set or an explicit null value was set).
+         */
+        public String getRawValue() {
+            return value;
+        }
+
         public boolean isDefaultValue() {
             return confidence < 0 || value == null;
         }

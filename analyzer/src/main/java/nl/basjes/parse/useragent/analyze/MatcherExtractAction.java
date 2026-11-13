@@ -23,6 +23,8 @@ import nl.basjes.parse.useragent.parser.UserAgentTreeWalkerParser;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 @SuppressWarnings("this-escape")
 public class MatcherExtractAction extends MatcherAction {
@@ -30,10 +32,12 @@ public class MatcherExtractAction extends MatcherAction {
 
     private final String attribute;
     private final long confidence;
-    private String foundValue = null;
     private String fixedValue = null;
     private final String                       expression;
+    // The field in the result template of the matcher (only used to store the fixed value during initialization).
     private       MutableAgentField resultAgentField;
+    // Where in the results of the matcher the value must be put (assigned by the Matcher at runtime initialization).
+    private transient int resultSlot = -1;
 
     @SuppressWarnings("unused") // Private constructor for serialization systems ONLY (like Kryo)
     private MatcherExtractAction() {
@@ -51,6 +55,23 @@ public class MatcherExtractAction extends MatcherAction {
 
     public void setResultAgentField(MutableAgentField newResultAgentField){
         resultAgentField = newResultAgentField;
+    }
+
+    void setResultSlot(int newResultSlot) {
+        resultSlot = newResultSlot;
+    }
+
+    /**
+     * Puts the fixed value (if this is a fixed value) in the result template of the matcher.
+     * Only called during the initialization of the matcher.
+     */
+    void applyFixedValue() {
+        if (fixedValue != null) {
+            if (verbose) {
+                LOG.info("Set fixedvalue ({})[{}]: {}", attribute, confidence, fixedValue);
+            }
+            resultAgentField.setValueForced(fixedValue, confidence);
+        }
     }
 
     protected ParserRuleContext parseWalkerExpression(UserAgentTreeWalkerParser parser) {
@@ -72,8 +93,10 @@ public class MatcherExtractAction extends MatcherAction {
         return attribute;
     }
 
-    public void inform(String key, WalkResult newlyFoundValue) {
-        if (verbose) {
+    @Override
+    protected void inform(@NonNull ParseState state, @Nullable String key, @NonNull WalkResult newlyFoundValue) {
+        boolean verboseParse = isVerbose(state);
+        if (verboseParse) {
             LOG.info("INFO  : EXTRACT ({}): {}", attribute, key);
             LOG.info("NEED  : EXTRACT ({}): {}", attribute, getMatchExpression());
         }
@@ -82,41 +105,38 @@ public class MatcherExtractAction extends MatcherAction {
          * This is also the priority in the fields.
          * So we always use the first value we find.
          */
-        if (this.foundValue == null) {
-            this.foundValue = newlyFoundValue.getValue();
-            if (verbose) {
+        if (state.getFoundValue(this) == null) {
+            state.setFoundValue(this, newlyFoundValue.getValue());
+            if (verboseParse) {
                 LOG.info("KEPT  : EXTRACT ({}): {}", attribute, key);
             }
         }
     }
 
-    public boolean obtainResult() {
-        processInformedMatches();
+    @Override
+    boolean obtainResult(@NonNull ParseState state) {
+        processInformedMatches(state);
+        boolean verboseParse = isVerbose(state);
         if (fixedValue != null) {
-            if (verbose) {
+            if (verboseParse) {
                 LOG.info("Set fixedvalue ({})[{}]: {}", attribute, confidence, fixedValue);
             }
-            resultAgentField.setValueForced(fixedValue, confidence);
+            state.setMatcherResult(resultSlot, fixedValue, confidence);
             return true;
         }
+        String foundValue = (String) state.getFoundValue(this);
         if (foundValue != null) {
-            if (verbose) {
+            if (verboseParse) {
                 LOG.info("Set parsevalue ({})[{}]: {}", attribute, confidence, foundValue);
             }
-            resultAgentField.setValueForced(foundValue, confidence);
+            state.setMatcherResult(resultSlot, foundValue, confidence);
             return true;
         }
-        if (verbose) {
+        if (verboseParse) {
             LOG.info("Nothing found for {}", attribute);
         }
 
         return false;
-    }
-
-    @Override
-    public void reset() {
-        super.reset();
-        this.foundValue = null;
     }
 
     @Override

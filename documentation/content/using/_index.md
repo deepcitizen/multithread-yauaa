@@ -25,8 +25,9 @@ To actually use it in your application you need to create an instance of the `Us
 
 Please instantiate a new UserAgentAnalyzer as few times as possible because the initialization step for a full UserAgentAnalyzer (i.e. all fields) usually takes something in the range of 2-5 seconds and uses a few hundred MiB of memory to store all the analysis datastructures.
 
-This analyzer can only do a single analysis at a time and to ensure correct working the main method is synchronized. If you have a high load you should simply create multiple instances and spread the load over those instances.
-When running in a framework (like [Apache Flink](../udf/Apache-Flink.md) or [Apache Beam](../udf/Apache-Beam.md)) this is usually automatically managed by these frameworks. In other systems may choose something like a threadpool to do that.
+A single instance of the analyzer is threadsafe and can be used by many threads at the same time (the parse method is NOT synchronized).
+So in a multithreaded application (like a webserver) you should simply create a single instance and share it between all threads.
+When running in a framework (like [Apache Flink](../udf/Apache-Flink.md) or [Apache Beam](../udf/Apache-Beam.md)) the framework may create (or deserialize) an instance per worker which is also fine.
 
 Note that if you need multiple instances of the UserAgentAnalyzer then you MUST create a new Builder instance for each of those (or serialize an instance and deserialize it multiple times).
 
@@ -54,6 +55,10 @@ Since version 6.7 you can specify a custom implementation for the cache by provi
 
 Do note that Yauaa assumes the caching implementation to be threadsafe.
 If you use a non-threadsafe implementation in a multithreaded context it will break.
+
+Yauaa only uses the `get`, `put` and (in exceptional cases) `clear` methods of the cache.
+A parse is never done while holding a lock in the cache so a cache miss never blocks the other threads.
+If multiple threads parse the same new useragent at the same time they all produce the same (immutable) result.
 
 The default caching implementation uses [Caffeine](https://github.com/ben-manes/caffeine) (since version 6.8).
 
@@ -221,13 +226,23 @@ If your project does not use Kryo and you have this warning then there are sever
 </dependency>
 ```
 
-## IMPORTANT: This library is single threaded !
-Because the internal analyzer code is not reentrant the main method has been synchronized on the instance.
-So from the perspective of you the application developer this library is thread safe.
+## Multithreading
+A single instance of the analyzer is threadsafe and lock free: Many threads can parse at the same time using the same instance.
 
-If you are in a multi threaded situation you should create a separate instance per thread or accept the speed limitation of the shared synchronized instance.
+- All the rules (matchers, lookups and the large internal hashmaps) are only read during parsing so they are shared by all threads.
+- All the state of a single parse is kept in a small object that is taken from (and returned to) a lock free pool. So the number of these objects is limited by the number of threads that are parsing at the same time (this also works fine with virtual threads).
+- Cache hits are lock free and (when parsing a String) do not create any objects.
 
-Note that you should really instantiate it only once per thread (and use a ThreadPool or something similar) because starting a new instance takes several seconds.
+So you should create only a single instance and share it between all your threads (creating an instance takes several seconds and a lot of memory).
+
+The methods that are intended for debugging the rules (like `getMatches()`, `getUsedMatches(...)` and `getTouchedMatchers()`) show the details of the most recent parse and are only meaningful in a single threaded situation.
+
+## Parsing performance and the worst case
+The grammar of useragents is ambiguous. In several places the parser must look ahead (sometimes until the end of the useragent) to decide how to continue (in ANTLR terms: a "full context prediction"). These are also the places where the ambiguity is found that is reported by `hasAmbiguity()` and `getAmbiguityCount()`.
+
+- The outcomes of these predictions are cached in a lock free cache that is shared by all threads and all analyzer instances. This cache is bounded (at most a few MiB) and does not change the results in any way: the parse tree and the reported ambiguity are exactly the same.
+- For some malformed (often malicious) useragents these predictions made the parse time grow quadratically with the length: a single useragent of 2KB took about 15 seconds of CPU time. The total amount of lookahead of a single parse is now limited, which makes the worst case about 0.1 seconds. Normal useragents never get anywhere near this limit. When the limit is reached the rest of that useragent is parsed without these predictions, so for these (very rare) useragents the parse result and the reported ambiguity can be different from older versions.
+- The parser needs a lot of stack for every level of nested brackets: with the default thread stack (1 MiB) a useragent with about 150 nested brackets made it fail with a `StackOverflowError`. A useragent with brackets that are nested more than 20 levels deep (normal useragents have at most 2 or 3 levels) is therefore not parsed: it is reported as a Hacker with the `HackerAttackVector` `Stack overflow`. At this limit a thread stack of 256 KiB is enough. If the parser does run out of stack (for example in a thread that has very little stack left) the result is the same.
 
 ## Eclipse users
 Be aware of there is a bug in Eclipse which will show you errors in perfectly valid Java code:

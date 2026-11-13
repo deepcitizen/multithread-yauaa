@@ -26,9 +26,6 @@ import org.jspecify.annotations.Nullable;
 
 public class StepPrevN extends Step {
 
-    private static final int SIZE = 20;
-    private transient ParseTree[] children = null;
-
     private final int steps;
 
     @SuppressWarnings("unused") // Private constructor for serialization systems ONLY (like Kryo)
@@ -40,6 +37,9 @@ public class StepPrevN extends Step {
         this.steps = steps;
     }
 
+    // NOTE: This step is shared by all threads so it must not have any mutable state.
+    // The original version used a (shared) buffer of 20 entries which also failed (ArrayIndexOutOfBoundsException
+    // which made the entire useragent a "Yauaa Exploit") if there were 20 or more siblings before the tree.
     private ParseTree prev(ParseTree tree) {
         ParseTree parent = up(tree);
 
@@ -47,24 +47,22 @@ public class StepPrevN extends Step {
             return null;
         }
 
-        if (children== null) {
-            children = new ParseTree[SIZE];
-        }
-
-        int lastChildIndex = -1;
-        ParseTree child = null;
-        int i;
-        for (i = 0; i < parent.getChildCount(); i++) {
-            if (!treeIsSeparator(child)) {
-                lastChildIndex++;
-                children[lastChildIndex] = child;
-            }
-            child = parent.getChild(i);
-            if (child == tree) {
-                if (lastChildIndex < steps) {
-                    break; // There is no previous
+        int childCount = parent.getChildCount();
+        for (int i = 0; i < childCount; i++) {
+            if (parent.getChild(i) == tree) {
+                // Walk back over the preceding siblings (skipping the separators).
+                int stepsToDo = steps;
+                for (int j = i - 1; j >= 0; j--) {
+                    ParseTree child = parent.getChild(j);
+                    if (treeIsSeparator(child)) {
+                        continue;
+                    }
+                    stepsToDo--;
+                    if (stepsToDo == 0) {
+                        return child;
+                    }
                 }
-                return children[lastChildIndex - steps + 1];
+                return null; // There are not enough previous siblings
             }
         }
         return null; // There is no previous

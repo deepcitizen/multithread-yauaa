@@ -135,7 +135,9 @@ public final class EvilManualUseragentStringHacks {
         // The 'fix' is to force an extra comment block in there.
         // NOTE: "Channel" is separate because we see "Channel/googleplay" and "Channel/App Store"
         result = replaceString(result, "Channel/App Store", "()Channel/App Store()");
-        result = PROPERTY_PRODUCT_VERSION_FIX.matcher(result).replaceAll("() $1/$2()");
+        if (mayContainPropertyProductVersion(result)) {
+            result = PROPERTY_PRODUCT_VERSION_FIX.matcher(result).replaceAll("() $1/$2()");
+        }
         if (result.startsWith("()")) {
             result = result.substring(2).trim();
         }
@@ -161,20 +163,28 @@ public final class EvilManualUseragentStringHacks {
         result = replaceString(result, "Ant.com Toolbar", "Ant.com_Toolbar");
 
         // Something like Android-4.0.3 is seen as a text instead of a product.
-        result = ANDROID_DASH_VERSION.matcher(result).replaceAll("$1 $2");
+        if (containsIgnoreCase(result, "android-")) {
+            result = ANDROID_DASH_VERSION.matcher(result).replaceAll("$1 $2");
+        }
 
         // We have seen problem cases like " Version/4.0Mobile Safari/530.17"
         result = MISSING_SPACE.matcher(result).replaceAll("$1 $2");
 
         // Sometimes a case like  "Android/9/something/" matches the pattern of Base84 which breaks everything
         // So those cases we simply insert a space to avoid this match and without changing the resulting tree.
-        result = AVOID_BASE64_MATCH.matcher(result).replaceAll("$1 $2");
+        if (containsIgnoreCase(result, "android/")) {
+            result = AVOID_BASE64_MATCH.matcher(result).replaceAll("$1 $2");
+        }
 
         // We have seen problem cases like "Java1.0.21.0" and "Wazzup1.1.100"
-        result = GLUED_VERSION_FIX.matcher(result).replaceAll("$1 $2");
+        if (containsIgnoreCase(result, "java") || containsIgnoreCase(result, "wazzup")) {
+            result = GLUED_VERSION_FIX.matcher(result).replaceAll("$1 $2");
+        }
 
         // For musical_ly_123 and trill_123
-        result = GLUED_VERSION_FIX_2.matcher(result).replaceAll("$1 $2 ");
+        if (mayContainGluedVersion(result)) {
+            result = GLUED_VERSION_FIX_2.matcher(result).replaceAll("$1 $2 ");
+        }
 
         // This one is a single useragent that hold significant traffic
         result = replaceString(result, " (Macintosh); ", " (Macintosh; ");
@@ -192,7 +202,8 @@ public final class EvilManualUseragentStringHacks {
         result = replaceString(result, ", _TV_", " _TV_");
 
         // Repair certain cases of broken useragents (like we see for the Facebook app a lot)
-        char firstChar = result.charAt(0);
+        // NOTE: The cleanups above can turn a useragent like "  " or "()" into an empty string.
+        char firstChar = result.isEmpty() ? ' ' : result.charAt(0);
         if (firstChar == '(' || firstChar == '[') {
             // We simply prefix a fake product name to continue parsing.
             result = "FakeYauaaProduct/3.14 " + result;
@@ -211,9 +222,80 @@ public final class EvilManualUseragentStringHacks {
         result = replaceString(result, "__", " ");
 
         // As found with the PICO 4 examples: Add an extra space behind ' OS' (handle: "Pico 4 OS1.2.3").
-        result = PICO_OS_TAG.matcher(result).replaceAll("$1 ");
+        if (containsIgnoreCase(result, "pico ")) {
+            result = PICO_OS_TAG.matcher(result).replaceAll("$1 ");
+        }
 
         return result; // 99.99% of the cases nothing will have changed.
+    }
+
+    // ------------------------------------------
+    // Cheap checks to avoid running a (relatively expensive) regular expression that cannot match anyway.
+    // Each check is a NECESSARY condition for the regex to match: If the check is false the regex would not have
+    // changed anything. The checks are deliberately at least as lenient as the CASE_INSENSITIVE matching of the regex
+    // (which only folds US-ASCII) because String.regionMatches(true,...) also folds non ASCII characters.
+
+    /**
+     * @param haystack The string to search in
+     * @param lowercaseNeedle The (lowercase, US-ASCII) string to find
+     * @return true if the needle MAY occur (case insensitive) in the haystack.
+     */
+    static boolean containsIgnoreCase(String haystack, String lowercaseNeedle) {
+        int needleLength = lowercaseNeedle.length();
+        int lastStart = haystack.length() - needleLength;
+        char firstLower = lowercaseNeedle.charAt(0);
+        char firstUpper = Character.toUpperCase(firstLower);
+        for (int start = 0; start <= lastStart; start++) {
+            char c = haystack.charAt(start);
+            if ((c == firstLower || c == firstUpper || c > 127) &&
+                haystack.regionMatches(true, start, lowercaseNeedle, 0, needleLength)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Must be the same as the names in PROPERTY_PRODUCT_VERSION_FIX (lowercase)
+    private static final String[] PROPERTY_PRODUCT_VERSION_NAMES = {
+        "nettype", "language", "appname", "app_version", "bytelocale", "bytefulllocale", "region"
+    };
+
+    /**
+     * The PROPERTY_PRODUCT_VERSION_FIX regex can only match if one of the names is directly followed by a '/'.
+     * @param useragent The useragent to check
+     * @return true if the PROPERTY_PRODUCT_VERSION_FIX regex MAY match
+     */
+    static boolean mayContainPropertyProductVersion(String useragent) {
+        for (int slash = useragent.indexOf('/'); slash >= 0; slash = useragent.indexOf('/', slash + 1)) {
+            for (String name : PROPERTY_PRODUCT_VERSION_NAMES) {
+                int start = slash - name.length();
+                if (start >= 0 && useragent.regionMatches(true, start, name, 0, name.length())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The GLUED_VERSION_FIX_2 regex can only match if there is a '_' that is preceded by a letter
+     * and followed by a digit, '_' or '.'.
+     * @param useragent The useragent to check
+     * @return true if the GLUED_VERSION_FIX_2 regex MAY match
+     */
+    static boolean mayContainGluedVersion(String useragent) {
+        int length = useragent.length();
+        for (int underscore = useragent.indexOf('_'); underscore >= 0; underscore = useragent.indexOf('_', underscore + 1)) {
+            if (underscore == 0 || underscore + 1 >= length) {
+                continue;
+            }
+            char before = useragent.charAt(underscore - 1);
+            char after  = useragent.charAt(underscore + 1);
+            if (Character.isLetter(before) && (Character.isDigit(after) || after == '_' || after == '.')) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------

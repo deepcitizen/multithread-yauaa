@@ -26,6 +26,7 @@ import nl.basjes.parse.useragent.UserAgent;
 import nl.basjes.parse.useragent.analyze.MatchMaker;
 import nl.basjes.parse.useragent.analyze.Matcher;
 import nl.basjes.parse.useragent.analyze.MatcherAction;
+import nl.basjes.parse.useragent.analyze.MatcherActionSet;
 import nl.basjes.parse.useragent.analyze.MatcherExtractAction;
 import nl.basjes.parse.useragent.analyze.MatcherFailIfFoundAction;
 import nl.basjes.parse.useragent.analyze.MatcherList;
@@ -162,6 +163,8 @@ public final class KryoConfig {
         kryo.register(MatcherAction.class);
         kryo.register(MatcherList.class);
         kryo.register(MatchesList.class);
+        kryo.register(MatcherActionSet.class);
+        kryo.register(MatcherAction[].class);
         kryo.register(MatcherExtractAction.class);
         kryo.register(MatcherVariableAction.class);
         kryo.register(MatcherRequireAction.class);

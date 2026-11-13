@@ -23,6 +23,8 @@ import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 @SuppressWarnings("this-escape")
 public class MatcherFailIfFoundAction extends MatcherAction {
@@ -52,21 +54,19 @@ public class MatcherFailIfFoundAction extends MatcherAction {
                 "It is useless to put a fixed value \"" + fixedValue + "\" in the failIfFound section.");
     }
 
-    private boolean foundRequiredValue = false;
-
     @Override
-    public void inform(String key, String value, ParseTree result) {
-        super.inform(key, value, result);
+    void inform(@NonNull ParseState state, @Nullable String key, @Nullable String value, @Nullable ParseTree result) {
+        super.inform(state, key, value, result);
         // If there are NO additional steps then we can immediately conclude this is matcher must fail.
         if (evaluator.isEmpty()) {
-            matcher.failImmediately();
+            matcher.failImmediately(state);
         }
     }
 
     @Override
-    public void inform(String key, WalkResult foundValue) {
-        foundRequiredValue = true;
-        if (verbose) {
+    protected void inform(@NonNull ParseState state, @Nullable String key, @NonNull WalkResult foundValue) {
+        state.setFoundValue(this, Boolean.TRUE); // The value we do not want was found
+        if (isVerbose(state)) {
             LOG.info("Info FailIfFound: {}", key);
             LOG.info("NEED FailIfFound: {}", getMatchExpression());
             LOG.info("KEPT FailIfFound: {}", key);
@@ -74,15 +74,9 @@ public class MatcherFailIfFoundAction extends MatcherAction {
     }
 
     @Override
-    public boolean obtainResult() {
-        processInformedMatches();
-        return !foundRequiredValue;
-    }
-
-    @Override
-    public void reset() {
-        super.reset();
-        foundRequiredValue = false;
+    boolean obtainResult(@NonNull ParseState state) {
+        processInformedMatches(state);
+        return state.getFoundValue(this) == null;
     }
 
     @Override

@@ -511,7 +511,7 @@ class TestTreewalkerRequire {
         }
 
         @Override
-        public void analyze(MutableUserAgent userAgent) {
+        void analyze(ParseState state, MutableUserAgent userAgent) {
             // Do nothing
         }
 

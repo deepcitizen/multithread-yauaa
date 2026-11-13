@@ -49,6 +49,13 @@ public class DebugUserAgent extends MutableUserAgent { // NOSONAR: No need to ov
     }
 
     @Override
+    public void setMatcherResults(Matcher appliedMatcher, String[] fieldNames, String[] values, long[] confidences) {
+        appliedMatcherResults.add(new ImmutablePair<>(
+            new ImmutableUserAgent(appliedMatcher.createResultUserAgent(values, confidences)), appliedMatcher));
+        super.setMatcherResults(appliedMatcher, fieldNames, values, confidences);
+    }
+
+    @Override
     public void reset() {
         appliedMatcherResults.clear();
         super.reset();

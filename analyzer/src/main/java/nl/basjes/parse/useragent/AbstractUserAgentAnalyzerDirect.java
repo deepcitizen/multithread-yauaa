@@ -196,7 +196,7 @@ public abstract class AbstractUserAgentAnalyzerDirect implements Analyzer, Analy
 
     /**
      * Parses and analyzes the useragent string provided in the MutableUserAgent instance.
-     * NOTE: This method is internally synchronized because the way the analyzer works is not reentrant.
+     * NOTE: This method is threadsafe and NOT synchronized: many threads can parse at the same time.
      * @param inputUserAgent The MutableUserAgent instance that is to be parsed and that gets all results
      * @return An ImmutableUserAgent copy of the results that is suitable for further usage and caching.
      */

@@ -21,12 +21,11 @@ public class VersionSplitter extends Splitter {
     protected VersionSplitter() {
     }
 
-    private static VersionSplitter instance;
+    // Eagerly created: This is stateless and shared by all threads.
+    private static final VersionSplitter INSTANCE = new VersionSplitter();
+
     public static VersionSplitter getInstance() {
-        if (instance == null) {
-            instance = new VersionSplitter();
-        }
-        return instance;
+        return INSTANCE;
     }
 
     public boolean isSeparator(char c) {

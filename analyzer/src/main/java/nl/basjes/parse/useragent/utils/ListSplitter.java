@@ -21,13 +21,11 @@ public final class ListSplitter extends Splitter {
     private ListSplitter() {
     }
 
-    private static ListSplitter instance = null;
+    // Eagerly created: This is stateless and shared by all threads.
+    private static final ListSplitter INSTANCE = new ListSplitter();
 
     public static ListSplitter getInstance() {
-        if (instance == null) {
-            instance = new ListSplitter();
-        }
-        return instance;
+        return INSTANCE;
     }
 
     public boolean isSeparator(char c) {

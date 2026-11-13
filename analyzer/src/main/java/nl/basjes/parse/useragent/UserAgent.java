@@ -38,6 +38,8 @@ import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -45,7 +47,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.stream.Collectors;
 
 import static org.apache.commons.text.WordUtils.capitalizeFully;
 
@@ -821,6 +822,31 @@ public interface UserAgent extends Serializable {
             }
         }
 
+        /**
+         * Applies the results of a single Matcher.
+         * This does exactly the same as {@link #set(MutableUserAgent, Matcher)} with a MutableUserAgent that holds
+         * exactly these fields (the fieldNames are sorted in the same way as the fields of a MutableUserAgent).
+         * @param appliedMatcher The matcher that produced these values (needed for development and debugging).
+         * @param fieldNames The names of the fields (sorted). The length of this array is the number of fields.
+         * @param values The raw values of the fields (same index as the fieldNames; this array may be longer).
+         * @param confidences The confidences of the fields (same index as the fieldNames; this array may be longer).
+         */
+        public void setMatcherResults(Matcher appliedMatcher, // NOSONAR: Unused parameter
+                                      String[] fieldNames,
+                                      String[] values,
+                                      long[] confidences) {
+            for (int i = 0; i < fieldNames.length; i++) {
+                set(fieldNames[i], values[i], confidences[i]);
+            }
+        }
+
+        /**
+         * @return The names (sorted) of all fields that are actually present in this instance (no default fields are added).
+         */
+        public List<String> getAllFieldNames() {
+            return new ArrayList<>(allFields.keySet());
+        }
+
         void setImmediateForTesting(String fieldName, MutableAgentField agentField) {
             allFields.put(fieldName, agentField);
         }
@@ -861,33 +887,62 @@ public interface UserAgent extends Serializable {
             return field.getConfidence();
         }
 
+        private static final Set<String> STANDARD_FIELDS_SET = new HashSet<>(STANDARD_FIELDS);
+        private static final Map<String, Integer> PRE_SORTED_FIELDS_INDEX = new HashMap<>();
+        static {
+            for (String fieldName : PRE_SORTED_FIELDS_LIST) {
+                PRE_SORTED_FIELDS_INDEX.putIfAbsent(fieldName, PRE_SORTED_FIELDS_INDEX.size());
+            }
+        }
+
+        private static void addSortingCandidate(String fieldName, String[] preSorted, List<String> others) {
+            // SET_ALL_FIELDS is not a field; this is a special operator.
+            // SYNTAX_ERROR is always added at the end.
+            if (SET_ALL_FIELDS.equals(fieldName) || SYNTAX_ERROR.equals(fieldName)) {
+                return;
+            }
+            Integer index = PRE_SORTED_FIELDS_INDEX.get(fieldName);
+            if (index == null) {
+                others.add(fieldName);
+            } else {
+                preSorted[index] = fieldName;
+            }
+        }
+
+        /**
+         * The available fields in a predictable order: First all present fields from the PRE_SORTED_FIELDS_LIST
+         * (in that order), then all other fields (sorted by name) and the SYNTAX_ERROR is always the last one.
+         * @return The sorted list of field names.
+         */
         @Override
         public List<String> getAvailableFieldNamesSorted() {
-            List<String> fieldNames = new ArrayList<>(allFields.size() + 10);
+            String[]     preSorted = new String[PRE_SORTED_FIELDS_INDEX.size()];
+            List<String> others    = new ArrayList<>();
             if (wantedFieldNames == null) {
-                fieldNames.addAll(STANDARD_FIELDS);
-                allFields.forEach((fieldName, field) -> {
-                    if (!fieldNames.contains(fieldName)) {
-                        fieldNames.add(fieldName);
+                for (String fieldName : STANDARD_FIELDS) {
+                    addSortingCandidate(fieldName, preSorted, others);
+                }
+                for (String fieldName : allFields.keySet()) {
+                    if (!STANDARD_FIELDS_SET.contains(fieldName)) {
+                        addSortingCandidate(fieldName, preSorted, others);
                     }
-                });
+                }
             } else {
-                fieldNames.addAll(wantedFieldNames);
+                for (String fieldName : wantedFieldNames) {
+                    addSortingCandidate(fieldName, preSorted, others);
+                }
             }
 
-            // This is not a field; this is a special operator.
-            fieldNames.remove(SET_ALL_FIELDS);
-
-            List<String> result = PRE_SORTED_FIELDS_LIST
-                .stream()
-                .filter(fieldNames::remove)
-                .collect(Collectors.toList());
-
-            Collections.sort(fieldNames);
-            result.addAll(fieldNames);
+            List<String> result = new ArrayList<>(preSorted.length + others.size() + 1);
+            for (String fieldName : preSorted) {
+                if (fieldName != null) {
+                    result.add(fieldName);
+                }
+            }
+            Collections.sort(others);
+            result.addAll(others);
 
             // This special system field is always available and we put it at the end.
-            result.remove(SYNTAX_ERROR);
             result.add(SYNTAX_ERROR);
 
             return result;
@@ -921,14 +976,18 @@ public interface UserAgent extends Serializable {
             String userAgentString = getUserAgentString();
             userAgentStringField = new ImmutableAgentField(userAgentString, 0L, false, userAgentString);
 
-            Map<String, ImmutableAgentField> preparingAllFields = new LinkedHashMap<>(userAgent.getAvailableFieldNamesSorted().size());
+            // Retrieving the fields does not change the list of available field names so we only determine it once.
+            List<String> fieldNamesSorted = userAgent.getAvailableFieldNamesSorted();
 
-            for (String fieldName: userAgent.getAvailableFieldNamesSorted()) {
+            // Capacity is chosen to avoid resizing the map
+            Map<String, ImmutableAgentField> preparingAllFields = new LinkedHashMap<>((int) (fieldNamesSorted.size() / 0.75f) + 1);
+
+            for (String fieldName: fieldNamesSorted) {
                 preparingAllFields.put(fieldName, new ImmutableAgentField(userAgent.get(fieldName)));
             }
 
             allFields = Collections.unmodifiableMap(preparingAllFields);
-            availableFieldNamesSorted = Collections.unmodifiableList(userAgent.getAvailableFieldNamesSorted());
+            availableFieldNamesSorted = Collections.unmodifiableList(fieldNamesSorted);
         }
 
         @Override

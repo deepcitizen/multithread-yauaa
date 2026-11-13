@@ -21,13 +21,11 @@ public final class WordSplitter extends Splitter {
     private WordSplitter() {
     }
 
-    private static WordSplitter instance = null;
+    // Eagerly created: This is stateless and shared by all threads.
+    private static final WordSplitter INSTANCE = new WordSplitter();
 
     public static WordSplitter getInstance() {
-        if (instance == null) {
-            instance = new WordSplitter();
-        }
-        return instance;
+        return INSTANCE;
     }
 
     public boolean isSeparator(char c) {

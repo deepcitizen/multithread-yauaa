@@ -3,6 +3,16 @@ This is intended as an overview of the major changes
 
 NEXT RELEASE
 ===
+- Analyzer:
+  - The analyzer is now fully threadsafe and lock free: a single instance can be used by many threads at the same time (the parse method is no longer synchronized).
+  - All mutable state of a single parse is now in a (pooled) ParseState; the rules are shared and immutable after initialization.
+  - Cache hits via parse(String) no longer create any objects and a cache miss no longer blocks other threads.
+  - Faster single threaded parsing and a lower memory footprint.
+  - The outcomes of the expensive full context (LL) predictions of the useragent parser are cached (lock free, shared by all threads). The parse trees and the reported ambiguity are exactly the same as before; parsing is about twice as fast.
+  - Fixed: Some malformed useragents of 2KB took up to 15 seconds of CPU time to parse. The amount of full context lookahead of a single parse is now limited which makes the worst case about 0.1 seconds.
+  - Fixed: A useragent with deeply nested brackets (about 150 levels, fewer in a thread with a smaller stack) made the parser fail with a StackOverflowError. Useragents with brackets nested more than 20 levels deep are now reported as a Hacker (HackerAttackVector 'Stack overflow'); a StackOverflowError in the parser gives the same result.
+  - Fixed: A useragent that is reduced to an empty string by the cleanup (like " ", "()" or "''") was reported as a "Yauaa Exploit"; it now gets the same result as the empty useragent.
+  - Fixed: The walk steps `<<`, `<<<` and `<<<<` failed (making the entire result a "Yauaa Exploit") if there were 20 or more siblings before the starting point (only reachable with custom rules).
 - New/improved detections:
   - Debian/Ubuntu APT
 

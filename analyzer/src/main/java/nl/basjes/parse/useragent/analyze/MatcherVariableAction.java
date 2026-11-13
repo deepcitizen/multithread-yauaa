@@ -22,6 +22,8 @@ import nl.basjes.parse.useragent.parser.UserAgentTreeWalkerParser;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.util.Set;
 
@@ -30,7 +32,6 @@ public class MatcherVariableAction extends MatcherAction {
     private static final Logger LOG = LogManager.getLogger(MatcherVariableAction.class);
 
     private final String variableName;
-    private transient WalkResult foundValue = null;
     private Set<MatcherAction> interestedActions;
 
     @SuppressWarnings("unused") // Private constructor for serialization systems ONLY (like Kryo)
@@ -56,8 +57,10 @@ public class MatcherVariableAction extends MatcherAction {
         return variableName;
     }
 
-    public void inform(String key, WalkResult newlyFoundValue) {
-        if (verbose) {
+    @Override
+    protected void inform(@NonNull ParseState state, @Nullable String key, @NonNull WalkResult newlyFoundValue) {
+        boolean verboseParse = isVerbose(state);
+        if (verboseParse) {
             LOG.info("INFO  : VARIABLE ({}): {}", variableName, key);
             LOG.info("NEED  : VARIABLE ({}): {}", variableName, getMatchExpression());
         }
@@ -66,29 +69,24 @@ public class MatcherVariableAction extends MatcherAction {
          * This is also the priority in the fields.
          * So we always use the first value we find.
          */
-        if (this.foundValue == null) {
-            this.foundValue = newlyFoundValue;
-            if (verbose) {
+        if (state.getFoundValue(this) == null) {
+            state.setFoundValue(this, newlyFoundValue);
+            if (verboseParse) {
                 LOG.info("KEPT  : VARIABLE ({}): {}", variableName, key);
             }
 
             if (interestedActions != null && !interestedActions.isEmpty()) {
                 for (MatcherAction action : interestedActions) {
-                    action.inform(variableName, newlyFoundValue.getValue(), newlyFoundValue.getTree());
+                    action.inform(state, variableName, newlyFoundValue.getValue(), newlyFoundValue.getTree());
                 }
             }
         }
     }
 
-    public boolean obtainResult() {
-        processInformedMatches();
-        return this.foundValue != null;
-    }
-
     @Override
-    public void reset() {
-        super.reset();
-        this.foundValue = null;
+    boolean obtainResult(@NonNull ParseState state) {
+        processInformedMatches(state);
+        return state.getFoundValue(this) != null;
     }
 
     @Override

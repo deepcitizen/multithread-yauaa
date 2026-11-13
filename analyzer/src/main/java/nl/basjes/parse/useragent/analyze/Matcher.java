@@ -17,11 +17,14 @@
 
 package nl.basjes.parse.useragent.analyze;
 
+import nl.basjes.parse.useragent.AgentField.MutableAgentField;
 import nl.basjes.parse.useragent.UserAgent.MutableUserAgent;
 import nl.basjes.parse.useragent.config.MatcherConfig;
 import nl.basjes.parse.useragent.config.MatcherConfig.ConfigLine;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -36,19 +39,31 @@ import java.util.TreeSet;
 
 import static nl.basjes.parse.useragent.UserAgent.SET_ALL_FIELDS;
 
+/**
+ * A Matcher is a single rule: a set of actions that must all be valid for the extracted values to be used.
+ * <p>
+ * After initialization a Matcher is immutable and can be shared by many threads at the same time.
+ * All state that changes during the analysis of a single useragent is kept in the {@link ParseState}.
+ */
 public class Matcher implements Serializable {
     private static final Logger LOG = LogManager.getLogger(Matcher.class);
+
+    private static final MatcherAction[] NO_ACTIONS = new MatcherAction[0];
 
     private final MatchMaker analyzer;
     private final List<MatcherVariableAction> variableActions;
     private final List<MatcherAction> dynamicActions;
     private final List<MatcherAction> fixedStringActions;
 
+    // The fields this matcher can produce. This is a template that is only modified during construction and
+    // initialization (the fixed values are put in here). At runtime it is never modified.
     private MutableUserAgent newValuesUserAgent = null;
 
+    // The wanted field names of the analyzer (null == all). Needed to reproduce the result for debugging.
+    private final Collection<String> wantedFieldNames;
+
     private long actionsThatRequireInput;
-    private boolean verbose;
-    private boolean permanentVerbose;
+    private final boolean verbose;
 
     public String getMatcherSourceLocation() {
         return matcherSourceLocation;
@@ -66,12 +81,28 @@ public class Matcher implements Serializable {
     // Used for error reporting: The filename and line number where the config was located.
     private String matcherSourceLocation;
 
+    // ---------------------------------------------------------------------------------------------------
+    // Runtime structures: Derived from the configuration by the MatchMaker after the initialization.
+    // These are transient because they are (re)created after deserialization.
+
+    // The index of this matcher in the MatchMaker (used to find the state in a ParseState).
+    private transient int matcherIndex = -1;
+    // A matcher that does not need any input is evaluated for every parse.
+    private transient boolean zeroInputMatcher = false;
+    private transient MatcherAction[] dynamicActionsArray = NO_ACTIONS;
+    // The names (sorted) of the fields this matcher outputs with the default value and confidence of each.
+    private transient String[] resultFieldNames = new String[0];
+    private transient String[] resultTemplateValues = new String[0];
+    private transient long[]   resultTemplateConfidences = new long[0];
+
     @SuppressWarnings("unused") // Private constructor for serialization systems ONLY (like Kryo)
     private Matcher() {
         this.analyzer = null;
         this.fixedStringActions = new ArrayList<>();
         this.variableActions = new ArrayList<>();
         this.dynamicActions = new ArrayList<>();
+        this.wantedFieldNames = null;
+        this.verbose = false;
     }
 
     // Package private constructor for testing purposes only
@@ -80,6 +111,8 @@ public class Matcher implements Serializable {
         this.fixedStringActions = new ArrayList<>();
         this.variableActions = new ArrayList<>();
         this.dynamicActions = new ArrayList<>();
+        this.wantedFieldNames = null;
+        this.verbose = false;
     }
 
     public void destroy() {
@@ -88,6 +121,8 @@ public class Matcher implements Serializable {
 
         fixedStringActions.forEach(MatcherAction::destroy);
         fixedStringActions.clear();
+
+        dynamicActionsArray = NO_ACTIONS;
     }
 
     public Map<String, Map<String, String>> getLookups() {
@@ -106,18 +141,15 @@ public class Matcher implements Serializable {
         this.fixedStringActions = new ArrayList<>();
         this.variableActions = new ArrayList<>();
         this.dynamicActions = new ArrayList<>();
+        this.wantedFieldNames = wantedFieldNames;
         this.newValuesUserAgent = new MutableUserAgent(wantedFieldNames);
 
         sourceFileName = matcherConfig.getMatcherSourceFilename();
         sourceFileLineNumber = matcherConfig.getMatcherSourceLineNumber();
         matcherSourceLocation = sourceFileName + ':' + sourceFileLineNumber;
 
-        verbose = false;
         List<String> options = matcherConfig.getOptions();
-        if (options != null && options.contains("verbose")) {
-            verbose = true;
-            permanentVerbose = true;
-        }
+        verbose = options != null && options.contains("verbose");
 
         boolean hasActiveExtractConfigs = false;
         boolean hasDefinedExtractConfigs = false;
@@ -212,9 +244,11 @@ public class Matcher implements Serializable {
 
         for (MatcherAction action: dynamicActions) {
             if (action instanceof MatcherExtractAction) {
-                if (((MatcherExtractAction)action).isFixedValue()) {
+                MatcherExtractAction extractAction = (MatcherExtractAction) action;
+                if (extractAction.isFixedValue()) {
                     fixedStringActions.add(action);
-                    action.obtainResult();
+                    // The fixed value is put in the template of the results of this matcher.
+                    extractAction.applyFixedValue();
                 }
             }
         }
@@ -274,7 +308,6 @@ public class Matcher implements Serializable {
         long actionsThatMustHaveMatches = 0;
         for (MatcherAction action : actions) {
             // If an action exists which without any data can be valid, then we must force the evaluation
-            action.reset();
             if (action.mustHaveMatches()) {
                 actionsThatMustHaveMatches++;
             }
@@ -282,6 +315,68 @@ public class Matcher implements Serializable {
         return actionsThatMustHaveMatches;
     }
 
+    /**
+     * Builds the (transient) runtime structures of this matcher. Must be called after {@link #initialize()}.
+     * @param newMatcherIndex The index of this matcher in the MatchMaker.
+     * @param firstActionIndex The first free index for the actions.
+     * @return The first free index for the actions after the actions of this matcher.
+     */
+    int initializeRuntime(int newMatcherIndex, int firstActionIndex) {
+        matcherIndex = newMatcherIndex;
+        zeroInputMatcher = actionsThatRequireInput == 0;
+        dynamicActionsArray = dynamicActions.toArray(NO_ACTIONS);
+
+        int actionIndex = firstActionIndex;
+        for (MatcherAction action : dynamicActionsArray) {
+            action.initializeRuntime(actionIndex++, matcherIndex, zeroInputMatcher);
+        }
+
+        // The results are applied in the same order as the iteration over all fields of a MutableUserAgent (sorted by name).
+        List<String> fieldNames = newValuesUserAgent.getAllFieldNames();
+        int fields = fieldNames.size();
+        String[] newResultFieldNames = new String[fields];
+        String[] newResultTemplateValues = new String[fields];
+        long[]   newResultTemplateConfidences = new long[fields];
+        for (int i = 0; i < fields; i++) {
+            String fieldName = fieldNames.get(i);
+            MutableAgentField field = newValuesUserAgent.get(fieldName);
+            newResultFieldNames[i] = fieldName;
+            newResultTemplateValues[i] = field.getRawValue();
+            newResultTemplateConfidences[i] = field.getConfidence();
+        }
+        resultFieldNames = newResultFieldNames;
+        resultTemplateValues = newResultTemplateValues;
+        resultTemplateConfidences = newResultTemplateConfidences;
+
+        for (MatcherAction action : dynamicActionsArray) {
+            linkResultSlot(action, fieldNames);
+        }
+        for (MatcherAction action : fixedStringActions) {
+            // A fixed value never receives any input so it never has any state.
+            action.initializeRuntime(-1, matcherIndex, zeroInputMatcher);
+            linkResultSlot(action, fieldNames);
+        }
+        return actionIndex;
+    }
+
+    private static void linkResultSlot(MatcherAction action, List<String> fieldNames) {
+        if (action instanceof MatcherExtractAction) {
+            MatcherExtractAction extractAction = (MatcherExtractAction) action;
+            int slot = fieldNames.indexOf(extractAction.getAttribute());
+            if (slot < 0) {
+                throw new IllegalStateException("No result slot for " + extractAction.getAttribute() + " in " + extractAction);
+            }
+            extractAction.setResultSlot(slot);
+        }
+    }
+
+    int getMatcherIndex() {
+        return matcherIndex;
+    }
+
+    boolean isZeroInputMatcher() {
+        return zeroInputMatcher;
+    }
 
     public Set<String> getAllPossibleFieldNames() {
         Set<String> results = new TreeSet<>();
@@ -326,23 +421,24 @@ public class Matcher implements Serializable {
      * Fires all matcher actions.
      * IFF all success then we tell the userAgent
      *
+     * @param state     The state of the current parse.
      * @param userAgent The useragent that needs to analyzed
      */
-    public void analyze(MutableUserAgent userAgent) {
-
+    void analyze(@NonNull ParseState state, @NonNull MutableUserAgent userAgent) {
         if (verbose) {
+            state.startMatcherResults(resultTemplateValues, resultTemplateConfidences);
             LOG.info("");
             LOG.info("--- Matcher.({}) ------------------------", matcherSourceLocation);
             LOG.info("ANALYSE ----------------------------");
             boolean good = true;
-            for (MatcherAction action : dynamicActions) {
-                if (action.cannotBeValid()) {
+            for (MatcherAction action : dynamicActionsArray) {
+                if (action.cannotBeValid(state)) {
                     LOG.error("CANNOT BE VALID : {}", action.getMatchExpression());
                     good = false;
                 }
             }
-            for (MatcherAction action : dynamicActions) {
-                if (!action.obtainResult()) {
+            for (MatcherAction action : dynamicActionsArray) {
+                if (!action.obtainResult(state)) {
                     LOG.error("FAILED : {}", action.getMatchExpression());
                     good = false;
                 }
@@ -354,85 +450,132 @@ public class Matcher implements Serializable {
                 return;
             }
         } else {
-            if (actionsThatRequireInput != actionsThatRequireInputAndReceivedInput) {
+            if (actionsThatRequireInput != state.getReceivedInput(this)) {
                 return;
             }
-            for (MatcherAction action : dynamicActions) {
-                if (action.obtainResult()) {
+            state.startMatcherResults(resultTemplateValues, resultTemplateConfidences);
+            for (MatcherAction action : dynamicActionsArray) {
+                if (action.obtainResult(state)) {
                     continue;
                 }
                 return; // If one of them is bad we skip the rest
             }
         }
-        userAgent.set(newValuesUserAgent, this);
+        userAgent.setMatcherResults(this, resultFieldNames, state.getResultValues(), state.getResultConfidences());
+    }
+
+    /**
+     * Creates a new MutableUserAgent with the provided results of this Matcher. Only used for debugging.
+     * @param values The (raw) values of all fields of this matcher in the same order as the resultFieldNames
+     * @param confidences The confidences of all fields of this matcher in the same order as the resultFieldNames
+     * @return A new MutableUserAgent which only holds the result of this Matcher.
+     */
+    @NonNull
+    public MutableUserAgent createResultUserAgent(@Nullable String @NonNull [] values, long @NonNull [] confidences) {
+        MutableUserAgent result = new MutableUserAgent(wantedFieldNames);
+        for (int i = 0; i < resultFieldNames.length; i++) {
+            result.get(resultFieldNames[i]).setValueForced(values[i], confidences[i]);
+        }
+        return result;
     }
 
     public boolean getVerbose() {
         return verbose;
     }
 
-    private boolean alreadyNotifiedAnalyzerWeReceivedInput = false;
-    void receivedInput() {
-        if (alreadyNotifiedAnalyzerWeReceivedInput) {
-            return;
-        }
-        analyzer.receivedInput(this);
-        alreadyNotifiedAnalyzerWeReceivedInput = true;
-    }
-
     public long getActionsThatRequireInput() {
         return actionsThatRequireInput;
     }
 
+    /**
+     * Debugging only: The number of actions that require input and have received input during the most recent parse.
+     * @return The number of actions that require input and have received input.
+     */
     public long getActionsThatRequireInputAndReceivedInput() {
-        return actionsThatRequireInputAndReceivedInput;
+        ParseState state = getDebugParseState();
+        if (state == null) {
+            return 0;
+        }
+        return state.getReceivedInput(this);
     }
 
-    private long actionsThatRequireInputAndReceivedInput = 0;
-    void gotMyFirstStartingPoint() {
-        actionsThatRequireInputAndReceivedInput++;
+    protected void failImmediately(@NonNull ParseState state) {
+        state.failImmediately(this);
     }
 
-    protected void failImmediately() {
-        actionsThatRequireInputAndReceivedInput = Long.MIN_VALUE; // So it will never match the expected
+    /**
+     * The state of the most recent parse (only meaningful for debugging in a single threaded situation).
+     * @return The ParseState of the most recent parse or null if not available.
+     */
+    @Nullable
+    ParseState getDebugParseState() {
+        if (analyzer == null) {
+            return null;
+        }
+        return analyzer.getDebugParseState();
     }
 
+    /**
+     * Debugging only.
+     * The temporary verbose flag is now part of each parse (see {@link MutableUserAgent#setDebug(boolean)}).
+     * @param newVerbose Ignored.
+     */
     public void setVerboseTemporarily(boolean newVerbose) {
-        for (MatcherAction action : dynamicActions) {
-            action.setVerbose(newVerbose, true);
-        }
+        // Nothing to do: The temporary verbose flag is now held in the ParseState of each parse.
     }
 
+    /**
+     * There is no state to reset anymore (it is all in the ParseState).
+     */
     public void reset() {
-        // If there are no dynamic actions we have fixed strings only
-        alreadyNotifiedAnalyzerWeReceivedInput = false;
-        actionsThatRequireInputAndReceivedInput = 0;
-        verbose = permanentVerbose;
-        for (MatcherAction action : dynamicActions) {
-            action.reset();
-        }
+        // Nothing to do: All state is held in the ParseState of each parse.
     }
 
+    /**
+     * Debugging only: The matches of all actions found during the most recent parse.
+     * @return The list of matches.
+     */
     public List<MatchesList.Match> getMatches() {
+        return getMatches(getDebugParseState());
+    }
+
+    @NonNull
+    List<MatchesList.Match> getMatches(@Nullable ParseState state) {
         List<MatchesList.Match> allMatches = new ArrayList<>(128);
+        if (state == null) {
+            return allMatches;
+        }
         for (MatcherAction action : dynamicActions) {
-            allMatches.addAll(action.getMatches());
+            allMatches.addAll(state.getMatches(action));
         }
         return allMatches;
     }
 
+    /**
+     * Debugging only: The matches of all actions that were actually used during the most recent parse.
+     * @return The list of matches.
+     */
     public List<MatchesList.Match> getUsedMatches() {
+        return getUsedMatches(getDebugParseState());
+    }
+
+    @NonNull
+    List<MatchesList.Match> getUsedMatches(@Nullable ParseState state) {
         List<MatchesList.Match> allMatches = new ArrayList<>(128);
+        if (state == null) {
+            return allMatches;
+        }
         for (MatcherAction action : dynamicActions) {
-            if (action.cannotBeValid()) {
+            if (action.cannotBeValid(state)) {
                 return new ArrayList<>(); // There is NO way one of them is valid
             }
         }
+        state.startMatcherResults(resultTemplateValues, resultTemplateConfidences);
         for (MatcherAction action : dynamicActions) {
-            if (!action.obtainResult()) {
+            if (!action.obtainResult(state)) {
                 return new ArrayList<>(); // There is NO way one of them is valid
             } else {
-                allMatches.addAll(action.getMatches());
+                allMatches.addAll(state.getMatches(action));
             }
         }
         return allMatches;
@@ -440,6 +583,7 @@ public class Matcher implements Serializable {
 
     @Override
     public String toString() {
+        ParseState state = getDebugParseState();
         StringBuilder sb = new StringBuilder(512);
         sb.append("MATCHER.(").append(matcherSourceLocation).append("):\n")
           .append("    VARIABLE:\n");
@@ -447,34 +591,28 @@ public class Matcher implements Serializable {
             if (action instanceof MatcherVariableAction) {
                 sb.append("        @").append(((MatcherVariableAction) action).getVariableName())
                     .append(":    ").append(action.getMatchExpression()).append('\n');
-                sb.append("        -->").append(action.getMatches().toStrings()).append('\n');
+                sb.append("        -->").append(action.getMatches(state).toStrings()).append('\n');
             }
         }
         sb.append("    REQUIRE:\n");
         for (MatcherAction action : dynamicActions) {
             if (action instanceof MatcherRequireAction) {
                 sb.append("        ").append(action.getMatchExpression()).append('\n');
-                if (action.getMatches() != null) {
-                    sb.append("        -->").append(action.getMatches().toStrings()).append('\n');
-                }
+                sb.append("        -->").append(action.getMatches(state).toStrings()).append('\n');
             }
         }
         sb.append("    FAIL_IF_FOUND:\n");
         for (MatcherAction action : dynamicActions) {
             if (action instanceof MatcherFailIfFoundAction) {
                 sb.append("        ").append(action.getMatchExpression()).append('\n');
-                if (action.getMatches() != null) {
-                    sb.append("        -->").append(action.getMatches().toStrings()).append('\n');
-                }
+                sb.append("        -->").append(action.getMatches(state).toStrings()).append('\n');
             }
         }
         sb.append("    EXTRACT:\n");
         for (MatcherAction action : dynamicActions) {
             if (action instanceof MatcherExtractAction) {
                 sb.append("        ").append(action).append('\n');
-                if (action.getMatches() != null) {
-                    sb.append("        -->").append(action.getMatches()).append('\n');
-                }
+                sb.append("        -->").append(action.getMatches(state)).append('\n');
             }
         }
         for (MatcherAction action : fixedStringActions) {

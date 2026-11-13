@@ -33,7 +33,8 @@ public class ParseSecChUaFullVersionList implements CHParser {
     public static final String HEADER_SPEC        = "The Sec-CH-UA-Full-Version-List request header field gives a server information about the full version for each brand in its brands list.";
     public static final String FIELD_NAME         = "secChUaFullVersionList";
 
-    private transient Map<String, ArrayList<Brand>> cache;
+    // Volatile: The cache can be replaced while other threads are parsing.
+    private transient volatile Map<String, ArrayList<Brand>> cache;
 
     public ParseSecChUaFullVersionList() {
         // Nothing to do right now
@@ -80,11 +81,17 @@ public class ParseSecChUaFullVersionList implements CHParser {
         }
         // " Not A;Brand";v="99.0.0.0", "Chromium";v="99.0.4844.51", "Google Chrome";v="99.0.4844.51"
         ArrayList<Brand> brands;
+        Map<String, ArrayList<Brand>> brandsCache = cache;
         // Do we even have a cache?
-        if (cache == null) {
+        if (brandsCache == null) {
             brands = BrandListParser.parse(input);
         } else {
-            brands = cache.computeIfAbsent(input, value -> BrandListParser.parse(input));
+            // NOTE: No computeIfAbsent to avoid blocking other threads while parsing.
+            brands = brandsCache.get(input);
+            if (brands == null) {
+                brands = BrandListParser.parse(input);
+                brandsCache.put(input, brands);
+            }
         }
 
         if (!brands.isEmpty()) {

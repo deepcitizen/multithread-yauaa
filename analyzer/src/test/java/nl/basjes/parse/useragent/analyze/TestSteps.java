@@ -17,6 +17,8 @@
 
 package nl.basjes.parse.useragent.analyze;
 
+import nl.basjes.parse.useragent.UserAgent;
+import nl.basjes.parse.useragent.UserAgentAnalyzer;
 import nl.basjes.parse.useragent.analyze.WordRangeVisitor.Range;
 import nl.basjes.parse.useragent.analyze.treewalker.steps.Step;
 import nl.basjes.parse.useragent.analyze.treewalker.steps.WalkList.WalkResult;
@@ -52,14 +54,19 @@ import nl.basjes.parse.useragent.analyze.treewalker.steps.walk.StepNextN;
 import nl.basjes.parse.useragent.analyze.treewalker.steps.walk.StepPrev;
 import nl.basjes.parse.useragent.analyze.treewalker.steps.walk.StepPrevN;
 import nl.basjes.parse.useragent.analyze.treewalker.steps.walk.StepUp;
+import nl.basjes.parse.useragent.parser.UserAgentParser.CommentSeparatorContext;
+import org.antlr.v4.runtime.CommonToken;
 import org.antlr.v4.runtime.ParserRuleContext;
+import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
+import org.antlr.v4.runtime.tree.TerminalNodeImpl;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.jspecify.annotations.NonNull;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -69,6 +76,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class TestSteps {
@@ -453,6 +461,77 @@ class TestSteps {
         Step step = new StepPrevN(5);
         LOG.info("Step {} --> {}", step.getClass().getSimpleName(), step);
         assertNull(step.walk(dummyTree, null));
+    }
+
+    @Test
+    void testStepPrevNManySiblings() {
+        // A node with many children: the 'real' children are interleaved with both types of separators.
+        // An older implementation failed if there were 20 or more (non-separator) siblings before the starting point.
+        ParserRuleContext parent = new ParserRuleContext();
+        List<ParseTree> nonSeparators = new ArrayList<>();
+        for (int i = 0; i < 75; i++) {
+            switch (i % 5) {
+                case 1:
+                    parent.addChild(new TerminalNodeImpl(new CommonToken(Token.MIN_USER_TOKEN_TYPE, ";")));
+                    break;
+                case 3:
+                    parent.addChild(new CommentSeparatorContext(parent, 0));
+                    break;
+                default:
+                    ParserRuleContext child = new ParserRuleContext(parent, 0);
+                    parent.addChild(child);
+                    nonSeparators.add(child);
+            }
+        }
+
+        for (int steps = 2; steps <= 4; steps++) {
+            Step step = new StepPrevN(steps);
+            for (int i = 0; i < nonSeparators.size(); i++) {
+                WalkResult result = step.walk(nonSeparators.get(i), null);
+                if (i < steps) {
+                    assertNull(result, "There should be no result for steps=" + steps + " from child " + i);
+                } else {
+                    assertNotNull(result, "There should be a result for steps=" + steps + " from child " + i);
+                    assertSame(nonSeparators.get(i - steps), result.getTree(),
+                        "Wrong result for steps=" + steps + " from child " + i);
+                }
+            }
+        }
+    }
+
+    @Test
+    void testStepPrevNManySiblingsInAnalyzer() {
+        UserAgentAnalyzer uaa = UserAgentAnalyzer
+            .newBuilder()
+            .dropDefaultResources()
+            .addYamlRule(
+                "config:\n" +
+                "- matcher:\n" +
+                "    extract:\n" +
+                "      - 'PrevOne  : 1 :agent.(25)product.name=\"Chrome\"^<'\n" +
+                "- matcher:\n" +
+                "    extract:\n" +
+                "      - 'PrevTwo  : 1 :agent.(25)product.name=\"Chrome\"^<<'\n" +
+                "- matcher:\n" +
+                "    extract:\n" +
+                "      - 'PrevFour : 1 :agent.(25)product.name=\"Chrome\"^<<<<'\n")
+            .withoutCache()
+            .hideMatcherLoadStats()
+            .build();
+
+        // The Chrome product is the 25th child of the root node: there are 24 non-separator siblings before it.
+        StringBuilder userAgent = new StringBuilder("Mozilla/5.0 (X11) AppleWebKit/537.36 (KHTML, like Gecko)");
+        for (int i = 1; i <= 22; i++) {
+            userAgent.append(" w").append(i).append(';');
+        }
+        userAgent.append(" Chrome/120.0.0.0 Safari/537.36");
+
+        // An older implementation failed here which turned the entire result into a "Yauaa Exploit".
+        UserAgent result = uaa.parse(userAgent.toString());
+        assertEquals("Unknown", result.getValue("HackerAttackVector"));
+        assertEquals("w22",     result.getValue("PrevOne"));
+        assertEquals("w21",     result.getValue("PrevTwo"));
+        assertEquals("w19",     result.getValue("PrevFour"));
     }
 
     @Test
