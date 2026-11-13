@@ -3,6 +3,11 @@ This is intended as an overview of the major changes
 
 NEXT RELEASE
 ===
+- New/improved detections:
+  - ...
+
+v8.4.0
+===
 - Analyzer:
   - The analyzer is now fully threadsafe and lock free: a single instance can be used by many threads at the same time (the parse method is no longer synchronized).
   - All mutable state of a single parse is now in a (pooled) ParseState; the rules are shared and immutable after initialization.
