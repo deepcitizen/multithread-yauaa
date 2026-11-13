@@ -27,7 +27,7 @@ The fork is published on Maven Central as `io.github.deepcitizen:yauaa`:
 <dependency>
   <groupId>io.github.deepcitizen</groupId>
   <artifactId>yauaa</artifactId>
-  <version>8.4.0</version>
+  <version>8.5.0</version>
 </dependency>
 ```
 

@@ -29,7 +29,7 @@ Yauaa: Yet Another UserAgent Analyzer (многопоточный форк)
 <dependency>
   <groupId>io.github.deepcitizen</groupId>
   <artifactId>yauaa</artifactId>
-  <version>8.4.0</version>
+  <version>8.5.0</version>
 </dependency>
 ```
 
