@@ -23,7 +23,7 @@
   <artifactId>yauaa-parent</artifactId>
   <packaging>pom</packaging>
   <groupId>io.github.deepcitizen</groupId>
-  <version>8.5.0</version>
+  <version>8.5.1-SNAPSHOT</version>
 
   <name>Yauaa : </name>
   <description>A parsing and analyzing library to get information from a useragent string. This is a fork of Yauaa (https://github.com/nielsbasjes/yauaa) with a threadsafe, lock free analyzer.</description>
