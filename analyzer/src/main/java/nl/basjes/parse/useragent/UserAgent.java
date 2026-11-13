@@ -31,6 +31,8 @@ import org.antlr.v4.runtime.dfa.DFA;
 import org.apache.commons.text.StringEscapeUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -62,6 +64,28 @@ public interface UserAgent extends Serializable {
     int getAmbiguityCount();
 
     List<String> getAvailableFieldNamesSorted();
+
+    /**
+     * The meta of this result: data (key/value) that is not the result of the analysis but that the
+     * {@link UserAgentHandler}s (and the application in the input of a parse) added to the result.
+     * A key of the meta is not a field: it is not in the lists of field names and not in the output of
+     * methods like toMap, toJson, toXML and toYamlTestCase.
+     * See {@link MutableUserAgent#setMeta(String, String)} for how the meta is cached.
+     * @return The meta (read only and never null; empty if there is no meta).
+     */
+    @NonNull
+    default Map<String, String> getMeta() {
+        return Collections.emptyMap();
+    }
+
+    /**
+     * @param key The key of the meta value.
+     * @return The meta value of this key or null if this result does not have it.
+     */
+    @Nullable
+    default String getMeta(@NonNull String key) {
+        return getMeta().get(key);
+    }
 
     default List<String> getCleanedAvailableFieldNamesSorted() {
         List<String> fieldNames = new ArrayList<>();
@@ -549,6 +573,9 @@ public interface UserAgent extends Serializable {
         if (!Objects.equals(getHeaders(), agent.getHeaders())) {
             return false;
         }
+        if (!Objects.equals(getMeta(), agent.getMeta())) {
+            return false;
+        }
         List<String> fieldNamesSorted1 = getAvailableFieldNamesSorted();
         List<String> fieldNamesSorted2 = agent.getAvailableFieldNamesSorted();
         if (!Objects.equals(fieldNamesSorted1, fieldNamesSorted2)) {
@@ -566,6 +593,11 @@ public interface UserAgent extends Serializable {
         int result = Objects.hash(getUserAgentString());
         for (String fieldName: getAvailableFieldNamesSorted()) {
             result = 31 * result + get(fieldName).hashCode();
+        }
+        Map<String, String> meta = getMeta();
+        if (!meta.isEmpty()) {
+            // Only with meta: The hashCode of a result without meta is the same as before the meta existed.
+            result = 31 * result + meta.hashCode();
         }
         return result;
     }
@@ -698,6 +730,10 @@ public interface UserAgent extends Serializable {
             }
 
             setWantedFieldNames(userAgent.getAvailableFieldNamesSorted());
+
+            if (!userAgent.meta.isEmpty()) {
+                meta = new LinkedHashMap<>(userAgent.meta);
+            }
         }
 
         public MutableUserAgent(Collection<String> wantedFieldNames) {
@@ -742,12 +778,63 @@ public interface UserAgent extends Serializable {
             this.headers.put(name, value);
         }
 
+        // The meta (see getMeta()) is only made when needed.
+        @Nullable private Map<String, String> meta = null; // Null means: No meta
+
+        @NonNull
+        @Override
+        public Map<String, String> getMeta() {
+            Map<String, String> theMeta = meta;
+            if (theMeta == null) {
+                return Collections.emptyMap();
+            }
+            return Collections.unmodifiableMap(theMeta);
+        }
+
+        /**
+         * Sets (or replaces) a meta value: data that is not the result of the analysis (see {@link #getMeta()}).
+         * <p>
+         * A {@link UserAgentHandler} adds meta to the result it returns (with this method) or to the request
+         * ({@link UserAgentHandler.Request#setMeta(String, String)}, also if it does not handle the request).
+         * <p>
+         * The meta is always cached, just like the fields of the result: the meta that a handler after the analysis
+         * adds is stored in the cache together with the result so the next parse of the same useragent (a cache hit)
+         * gets the same meta. So this meta must only depend on the useragent (and Client Hints).
+         * The meta that is set before the analysis (in the input of a parse and by the handlers before the analysis)
+         * is set again for every parse (these are called for every parse) so it is added to every result (also to a
+         * cache hit) and never comes from the cache.
+         * @param key The key of the meta value.
+         * @param value The meta value.
+         */
+        public void setMeta(@NonNull String key, @NonNull String value) {
+            Objects.requireNonNull(key,   "The key of a meta value must not be null");
+            Objects.requireNonNull(value, "A meta value must not be null");
+            Map<String, String> theMeta = meta;
+            if (theMeta == null) {
+                theMeta = new LinkedHashMap<>();
+                meta = theMeta;
+            }
+            theMeta.put(key, value);
+        }
+
+        /**
+         * Removes a meta value from this instance (does nothing if it does not have it).
+         * @param key The key of the meta value.
+         */
+        public void removeMeta(@NonNull String key) {
+            Map<String, String> theMeta = meta;
+            if (theMeta != null) {
+                theMeta.remove(key);
+            }
+        }
+
         public void reset() {
             hasSyntaxError = false;
             hasAmbiguity = false;
             ambiguityCount = 0;
 
             allFields.values().forEach(MutableAgentField::reset);
+            // The meta is not reset: it is not a result of the analysis.
         }
 
         public static boolean isSystemField(String fieldname) {
@@ -964,8 +1051,28 @@ public interface UserAgent extends Serializable {
         private final boolean                           hasSyntaxError;
         private final boolean                           hasAmbiguity;
         private final int                               ambiguityCount;
+        private final Map<String, String>               meta;   // Read only (empty if there is no meta)
 
+        /**
+         * A copy of the userAgent (including its meta).
+         * @param userAgent The userAgent that is copied.
+         */
         public ImmutableUserAgent(UserAgent userAgent) {
+            this(userAgent, userAgent.getMeta());
+        }
+
+        /**
+         * A copy of the fields and headers of the userAgent with the provided meta.
+         * @param userAgent The userAgent of which the fields and headers are copied (its meta is NOT used).
+         * @param metaToCopy The meta of the new instance (it is copied; null: no meta).
+         */
+        ImmutableUserAgent(@NonNull UserAgent userAgent, @Nullable Map<String, String> metaToCopy) {
+            if (metaToCopy == null || metaToCopy.isEmpty()) {
+                meta = Collections.emptyMap();
+            } else {
+                meta = Collections.unmodifiableMap(new LinkedHashMap<>(metaToCopy));
+            }
+
             headers = new LinkedCaseInsensitiveMap<>();
             headers.putAll(userAgent.getHeaders());
 
@@ -988,6 +1095,45 @@ public interface UserAgent extends Serializable {
 
             allFields = Collections.unmodifiableMap(preparingAllFields);
             availableFieldNamesSorted = Collections.unmodifiableList(fieldNamesSorted);
+        }
+
+        /**
+         * A copy of the base with a different meta: all other (immutable) parts are shared with the base.
+         * @param base The instance that is copied.
+         * @param newMeta The meta of the new instance (a new map that is not used by anything else).
+         */
+        private ImmutableUserAgent(@NonNull ImmutableUserAgent base, @NonNull Map<String, String> newMeta) {
+            meta                             = Collections.unmodifiableMap(newMeta);
+            headers                          = base.headers;
+            userAgentStringField             = base.userAgentStringField;
+            allFields                        = base.allFields;
+            availableFieldNamesSorted        = base.availableFieldNamesSorted;
+            cleanedAvailableFieldNamesSorted = base.cleanedAvailableFieldNamesSorted;
+            hasSyntaxError                   = base.hasSyntaxError;
+            hasAmbiguity                     = base.hasAmbiguity;
+            ambiguityCount                   = base.ambiguityCount;
+        }
+
+        @NonNull
+        @Override
+        public Map<String, String> getMeta() {
+            return meta;
+        }
+
+        /**
+         * Adds the meta values of which this instance does not have the key (like {@link Map#putIfAbsent}): the meta
+         * of this instance wins. Used to add the meta of the request (which is never stored in the cache) to a result.
+         * @param otherMeta The meta that is added (null: nothing is added).
+         * @return This instance if nothing has to be added, else a copy with the added meta.
+         */
+        @NonNull
+        ImmutableUserAgent withMetaIfAbsent(@Nullable Map<String, String> otherMeta) {
+            if (otherMeta == null || otherMeta.isEmpty() || meta.keySet().containsAll(otherMeta.keySet())) {
+                return this;
+            }
+            Map<String, String> combined = new LinkedHashMap<>(otherMeta);
+            combined.putAll(meta);
+            return new ImmutableUserAgent(this, combined);
         }
 
         @Override

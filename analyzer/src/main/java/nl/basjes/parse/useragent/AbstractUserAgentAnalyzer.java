@@ -195,7 +195,8 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
     /**
      * Parses and analyzes the provided useragent string.
      * This method is threadsafe and the (very common) cache hit is lock free and does not create any objects
-     * (only the handlers before the analysis, if there are any, get a new request object).
+     * (only the handlers before the analysis, if there are any, get a new request object and if they add meta to the
+     * request the result is a copy of the cached result with that meta).
      * @param userAgentString The User-Agent String that is to be parsed and analyzed
      * @return An ImmutableUserAgent record that holds all the results.
      */
@@ -203,9 +204,14 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
     @Override
     public ImmutableUserAgent parse(@Nullable String userAgentString) {
         // The handlers before the analysis come before everything else (also before the cache).
-        ImmutableUserAgent handled = handleBeforeAnalysis(userAgentString, null);
-        if (handled != null) {
-            return handled;
+        Map<String, String> requestMeta = null;
+        UserAgentHandler.Request request = newRequestBeforeAnalysis(userAgentString, null, null);
+        if (request != null) {
+            ImmutableUserAgent handled = handleBeforeAnalysis(request);
+            if (handled != null) {
+                return handled;
+            }
+            requestMeta = request.getCollectedMeta();
         }
         if (userAgentString != null) {
             Map<String, ImmutableUserAgent> cache = parseCache;
@@ -213,19 +219,20 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
                 // With only a User-Agent the caching key is the useragent itself.
                 ImmutableUserAgent cachedResult = cache.get(userAgentString);
                 if (cachedResult != null) {
-                    return cachedResult;
+                    return cachedResult.withMetaIfAbsent(requestMeta);
                 }
             }
         }
         MutableUserAgent userAgent = new MutableUserAgent(getWantedFieldNames());
         userAgent.addHeader(USERAGENT_HEADER, userAgentString);
-        return parseUsingCache(userAgent);
+        return parseUsingCache(userAgent, requestMeta);
     }
 
     /**
      * Parses and analyzes the provided request headers.
      * This method is threadsafe and if only the User-Agent is provided the cache hit is lock free and does not
-     * create any objects (only the handlers before the analysis, if there are any, get a new request object).
+     * create any objects (only the handlers before the analysis, if there are any, get a new request object and if
+     * they add meta to the request the result is a copy of the cached result with that meta).
      * @param requestHeaders A map of all useful request Headers: the "User-Agent" and all Client Hints: "Sec-Ch-Ua"*
      * @return An ImmutableUserAgent record that holds all the results.
      */
@@ -240,9 +247,14 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
             if (USERAGENT_HEADER.equals(headerName) || USERAGENT_HEADER_LOWERCASE.equals(headerName)) {
                 String userAgentString = header.getValue();
                 // The handlers before the analysis come before everything else (also before the cache).
-                ImmutableUserAgent handled = handleBeforeAnalysis(userAgentString, requestHeaders);
-                if (handled != null) {
-                    return handled;
+                Map<String, String> requestMeta = null;
+                UserAgentHandler.Request request = newRequestBeforeAnalysis(userAgentString, requestHeaders, null);
+                if (request != null) {
+                    ImmutableUserAgent handled = handleBeforeAnalysis(request);
+                    if (handled != null) {
+                        return handled;
+                    }
+                    requestMeta = request.getCollectedMeta();
                 }
                 if (userAgentString != null) {
                     Map<String, ImmutableUserAgent> cache = parseCache;
@@ -250,13 +262,13 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
                         // With only a User-Agent the caching key is the useragent itself.
                         ImmutableUserAgent cachedResult = cache.get(userAgentString);
                         if (cachedResult != null) {
-                            return cachedResult;
+                            return cachedResult.withMetaIfAbsent(requestMeta);
                         }
                     }
                 }
                 MutableUserAgent userAgent = new MutableUserAgent(getWantedFieldNames());
                 userAgent.addHeader(requestHeaders);
-                return parseUsingCache(userAgent);
+                return parseUsingCache(userAgent, requestMeta);
             }
         }
         return super.parse(requestHeaders);
@@ -268,34 +280,44 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
     @Override
     public ImmutableUserAgent parse(@Nullable MutableUserAgent userAgent) {
         // The handlers before the analysis come before everything else (also before the cache).
-        ImmutableUserAgent handled = handleBeforeAnalysis(userAgent);
-        if (handled != null) {
-            return handled;
+        Map<String, String> requestMeta = metaOf(userAgent);
+        UserAgentHandler.Request request = newRequestBeforeAnalysis(userAgent, requestMeta);
+        if (request != null) {
+            ImmutableUserAgent handled = handleBeforeAnalysis(request);
+            if (handled != null) {
+                return handled;
+            }
+            requestMeta = request.getCollectedMeta();
         }
-        return parseUsingCache(userAgent);
+        return parseUsingCache(userAgent, requestMeta);
     }
 
     /**
      * The cached result or (if not in the cache) the built-in analysis followed by the handlers after the analysis.
      * So this does NOT call the handlers before the analysis.
+     * The cache gets the result with the meta of the handlers after the analysis; the meta of the request (the input
+     * and the handlers before the analysis) is never stored in the cache: it is added to every result.
+     * @param userAgent The input of the parse.
+     * @param requestMeta The meta of the request (null if none).
+     * @return The result.
      */
     @NonNull
-    private ImmutableUserAgent parseUsingCache(@Nullable MutableUserAgent userAgent) {
+    private ImmutableUserAgent parseUsingCache(@Nullable MutableUserAgent userAgent, @Nullable Map<String, String> requestMeta) {
         // Many caching implementations do not allow null keys and/or values
         if (userAgent == null || userAgent.getUserAgentString() == null) {
             ImmutableUserAgent result = nullAgent;
             if (result == null) {
                 // If multiple threads do this at the same time they all produce the same (immutable) result.
-                result = analyze(new MutableUserAgent((String) null));
+                result = analyze(new MutableUserAgent((String) null), requestMeta);
                 nullAgent = result;
             }
-            return result;
+            return result.withMetaIfAbsent(requestMeta);
         }
 
         Map<String, ImmutableUserAgent> cache = parseCache;
         // Do we even have a cache?
         if (cache == null) {
-            return analyze(userAgent);
+            return analyze(userAgent, requestMeta).withMetaIfAbsent(requestMeta);
         }
 
         String cachingKey = userAgent.getUserAgentString();
@@ -320,10 +342,10 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
         //       If multiple threads parse the same new useragent at the same time they all produce an equal result.
         ImmutableUserAgent result = cache.get(cachingKey);
         if (result == null) {
-            result = analyze(userAgent);
+            result = analyze(userAgent, requestMeta);
             cache.put(cachingKey, result);
         }
-        return result;
+        return result.withMetaIfAbsent(requestMeta);
     }
 
     @SuppressWarnings("unchecked") // For all the casts of 'this' to 'B'

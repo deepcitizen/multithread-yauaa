@@ -665,6 +665,7 @@
             <inputExclude>documentation/**</inputExclude>
             <!-- Raw benchmark results -->
             <inputExclude>benchmarks/results/*.txt</inputExclude>
+            <inputExclude>devtools/tracker-loadtest/results/**</inputExclude>
             <!-- Files that cannot be 'polluted' -->
             <inputExclude>.github/**</inputExclude>
             <inputExclude>SECURITY.md</inputExclude>

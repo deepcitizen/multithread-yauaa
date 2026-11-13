@@ -206,26 +206,36 @@ public abstract class AbstractUserAgentAnalyzerDirect implements Analyzer, Analy
      * NOTE: This method is threadsafe and NOT synchronized: many threads can parse at the same time.
      * NOTE: Always use the returned result: the provided instance does not get the results if the request
      *       is handled by a {@link UserAgentHandler} before the analysis (or comes from a cache).
+     * NOTE: The meta of the provided instance (see {@link UserAgent#getMeta()}) is given to the handlers and is in the
+     *       returned result (it is never cached).
      * @param inputUserAgent The MutableUserAgent instance that is to be parsed and that gets all results
      * @return An ImmutableUserAgent copy of the results that is suitable for further usage and caching.
      */
     @NonNull
     public ImmutableUserAgent parse(@Nullable MutableUserAgent inputUserAgent) {
-        ImmutableUserAgent handled = handleBeforeAnalysis(inputUserAgent);
-        if (handled != null) {
-            return handled;
+        Map<String, String> requestMeta = metaOf(inputUserAgent);
+        UserAgentHandler.Request request = newRequestBeforeAnalysis(inputUserAgent, requestMeta);
+        if (request != null) {
+            ImmutableUserAgent handled = handleBeforeAnalysis(request);
+            if (handled != null) {
+                return handled;
+            }
+            requestMeta = request.getCollectedMeta();
         }
-        return analyze(inputUserAgent);
+        return analyze(inputUserAgent, requestMeta).withMetaIfAbsent(requestMeta);
     }
 
     /**
      * The built-in analysis followed by the handlers after the analysis.
      * So this does NOT call the handlers before the analysis and does NOT use any cache.
+     * The returned result does NOT have the meta of the request (only the meta of the handlers after the analysis)
+     * because it can be cached: the caller adds the meta of the request (with withMetaIfAbsent).
      * @param inputUserAgent The MutableUserAgent instance that is to be parsed and that gets all results
+     * @param requestMeta The meta of the request (input and handlers before the analysis), null if none.
      * @return An ImmutableUserAgent copy of the results that is suitable for further usage and caching.
      */
     @NonNull
-    final ImmutableUserAgent analyze(@Nullable MutableUserAgent inputUserAgent) {
+    final ImmutableUserAgent analyze(@Nullable MutableUserAgent inputUserAgent, @Nullable Map<String, String> requestMeta) {
         MutableUserAgent userAgent;
         if (inputUserAgent == null) {
             userAgent = matchMaker.parse(new MutableUserAgent((String) null));
@@ -243,71 +253,120 @@ public abstract class AbstractUserAgentAnalyzerDirect implements Analyzer, Analy
             }
             userAgent = matchMaker.hardCodedPostProcessing(userAgent);
         }
-        ImmutableUserAgent result = new ImmutableUserAgent(userAgent);
+        // The analysis itself never has any meta (the input may have meta: that is part of the requestMeta).
+        ImmutableUserAgent result = new ImmutableUserAgent(userAgent, null);
 
         UserAgentHandler[] handlers = handlersAfterAnalysis;
         if (handlers == null) {
             return result;
         }
-        ImmutableUserAgent handled = handle(handlers,
-            new UserAgentHandler.Request(getWantedFieldNames(), result.getUserAgentString(), result.getHeaders(), result));
-        return handled == null ? result : handled;
+        UserAgentHandler.Request request = new UserAgentHandler.Request(
+            getWantedFieldNames(), result.getUserAgentString(), result.getHeaders(), result, requestMeta);
+        MutableUserAgent handled = callHandlers(handlers, request);
+        if (handled == null) {
+            return result.withMetaIfAbsent(request.getOwnMeta());
+        }
+        return completeHandlerResult(handled, request, request.getOwnMeta());
     }
 
     // ===============================================================================================================
     // The handlers
 
     /**
-     * Calls the handlers before the analysis (if there are any) for a request.
+     * Creates the request for the handlers before the analysis.
      * @param userAgentString The User-Agent of the request.
      * @param requestHeaders All headers of the request (null if the request only has the User-Agent).
-     * @return The (completed) result of the first handler that handled the request or null if none did.
+     * @param inputMeta The meta of the input of the parse (null if none).
+     * @return The new request or null if there are no handlers before the analysis.
      */
-    @Nullable
-    final ImmutableUserAgent handleBeforeAnalysis(@Nullable String userAgentString,
-                                                  @Nullable Map<String, String> requestHeaders) {
-        UserAgentHandler[] handlers = handlersBeforeAnalysis;
-        if (handlers == null) {
+    final UserAgentHandler.@Nullable Request newRequestBeforeAnalysis(@Nullable String              userAgentString,
+                                                                      @Nullable Map<String, String> requestHeaders,
+                                                                      @Nullable Map<String, String> inputMeta) {
+        if (handlersBeforeAnalysis == null) {
             return null;
         }
-        return handle(handlers, new UserAgentHandler.Request(getWantedFieldNames(), userAgentString, requestHeaders, null));
+        return new UserAgentHandler.Request(getWantedFieldNames(), userAgentString, requestHeaders, null, inputMeta);
     }
 
     /**
-     * Calls the handlers before the analysis (if there are any) for a request.
-     * @param userAgent The request (null is handled as a request without a User-Agent).
-     * @return The (completed) result of the first handler that handled the request or null if none did.
+     * Creates the request for the handlers before the analysis.
+     * @param userAgent The input of the parse (null is handled as a request without a User-Agent).
+     * @param inputMeta The meta of the input of the parse (null if none).
+     * @return The new request or null if there are no handlers before the analysis.
      */
-    @Nullable
-    final ImmutableUserAgent handleBeforeAnalysis(@Nullable MutableUserAgent userAgent) {
+    final UserAgentHandler.@Nullable Request newRequestBeforeAnalysis(@Nullable MutableUserAgent    userAgent,
+                                                                      @Nullable Map<String, String> inputMeta) {
         if (handlersBeforeAnalysis == null) {
             return null;
         }
         if (userAgent == null) {
-            return handleBeforeAnalysis(null, null);
+            return newRequestBeforeAnalysis(null, null, inputMeta);
         }
-        return handleBeforeAnalysis(userAgent.getUserAgentString(), userAgent.getHeaders());
+        return newRequestBeforeAnalysis(userAgent.getUserAgentString(), userAgent.getHeaders(), inputMeta);
+    }
+
+    /**
+     * Calls the handlers before the analysis for a request.
+     * @param request The request (from newRequestBeforeAnalysis).
+     * @return The (completed) result of the first handler that handled the request or null if none did.
+     *         If none did then request.getCollectedMeta() is the meta that the result of the parse must get.
+     */
+    @Nullable
+    final ImmutableUserAgent handleBeforeAnalysis(UserAgentHandler.@NonNull Request request) {
+        UserAgentHandler[] handlers = handlersBeforeAnalysis;
+        if (handlers == null) {
+            return null;
+        }
+        MutableUserAgent handled = callHandlers(handlers, request);
+        if (handled == null) {
+            return null;
+        }
+        return completeHandlerResult(handled, request, request.getCollectedMeta());
     }
 
     @Nullable
-    private ImmutableUserAgent handle(@NonNull UserAgentHandler @NonNull [] handlers,
-                                      UserAgentHandler.@NonNull Request request) {
+    private static MutableUserAgent callHandlers(@NonNull UserAgentHandler @NonNull [] handlers,
+                                                 UserAgentHandler.@NonNull Request request) {
         for (UserAgentHandler handler : handlers) {
             MutableUserAgent result = handler.handle(request);
             if (result != null) {
-                return completeHandlerResult(result, request);
+                return result;
             }
         }
         return null;
     }
 
+    /**
+     * @param result The result of a handler.
+     * @param request The request that the handler handled.
+     * @param requestMeta The meta of the request that the result must get (the meta of the result wins).
+     * @return The completed result.
+     */
     @NonNull
     private ImmutableUserAgent completeHandlerResult(@NonNull MutableUserAgent result,
-                                                     UserAgentHandler.@NonNull Request request) {
+                                                     UserAgentHandler.@NonNull Request request,
+                                                     @Nullable Map<String, String> requestMeta) {
         // The result is about this request (also if the handler did not create it with request.newResult()).
         request.copyHeadersInto(result);
         // Calculate all fields that are constructed from the provided ones (like AgentNameVersion).
-        return new ImmutableUserAgent(matchMaker.hardCodedPostProcessing(result));
+        MutableUserAgent completed = matchMaker.hardCodedPostProcessing(result);
+        return new ImmutableUserAgent(completed, UserAgentHandler.Request.combineMeta(requestMeta, completed.getMeta()));
+    }
+
+    /**
+     * @param userAgent The input of a parse.
+     * @return The meta of the input (null if there is none).
+     */
+    @Nullable
+    static Map<String, String> metaOf(@Nullable UserAgent userAgent) {
+        if (userAgent == null) {
+            return null;
+        }
+        Map<String, String> meta = userAgent.getMeta();
+        if (meta.isEmpty()) {
+            return null;
+        }
+        return meta;
     }
 
     void setHandlers(@NonNull List<UserAgentHandler> newHandlersBeforeAnalysis,

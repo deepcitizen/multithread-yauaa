@@ -132,6 +132,43 @@ UserAgentAnalyzer uaa = UserAgentAnalyzer
     .build();
 ```
 
+### Data of your own in the result (meta)
+Every result has a meta: key/value strings that are not the result of the analysis (`getMeta()` and `getMeta(key)`).
+A meta key is not a field: it is not in the list of field names and not in the output of `toMap`, `toJson`, `toXML` and `toYamlTestCase`.
+
+- A handler adds meta to the result it returns (`result.setMeta(key, value)`) or to the request (`request.setMeta(key, value)`). The latter also works when the handler does not handle the request (returns `null`): the meta goes into the result, whoever creates it.
+- The handlers that are called later read the meta so far with `request.getMeta(key)` (a handler after the analysis also sees the meta of the handlers before the analysis) and the application reads it from the result of `parse`.
+- When the same key is set more than once the last one wins: the meta of a returned result wins from the meta of the request and the meta of a handler after the analysis wins from the meta of a handler before the analysis.
+- With `parse(MutableUserAgent)` the meta of the input is given to the handlers and is in the result.
+
+The meta is always cached, just like the fields:
+
+- The meta of the handlers after the analysis is stored in the cache together with the result, so a cache hit has the same meta. This meta is used for every parse of the same useragent (and Client Hints), so it must only depend on those (not on the time, the input meta, ...).
+- The meta of the input and of the handlers before the analysis is set again by every parse (these handlers are called for every parse), so it is never taken from the cache: it is added to every result, also to a cache hit.
+- A result of a handler before the analysis is never cached at all.
+
+```java
+UserAgentAnalyzer uaa = UserAgentAnalyzer
+    .newBuilder()
+    .addHandlerBeforeAnalysis(request -> {
+        // Only adds meta: the useragent is analyzed normally.
+        String userAgent = request.getUserAgentString();
+        if (userAgent != null && userAgent.startsWith("MyApp/")) {
+            request.setMeta("app", "MyApp");
+        }
+        return null;
+    })
+    .addHandlerAfterAnalysis(request -> {
+        // Cached with the result.
+        request.setMeta("checkedBy", "MyRules");
+        return null;
+    })
+    .build();
+
+UserAgent userAgent = uaa.parse(useragent);
+String app = userAgent.getMeta("app"); // null if it is not "MyApp"
+```
+
 ## Logging dependencies
 The Yauaa engine uses Log4j2 API as the logging framework.
 

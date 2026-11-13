@@ -16,7 +16,8 @@ All the detection rules come from the original project. This fork changes how th
   fast as the original.
 - **A bounded worst case.** A malformed useragent of 2 KB takes at most about 0.1 s of CPU instead of up to 15 s.
   Deeply nested brackets no longer crash the parser with a `StackOverflowError`.
-- **Your own analysis.** An application can analyze some useragents itself with a `UserAgentHandler`.
+- **Your own analysis.** An application can analyze some useragents itself with a `UserAgentHandler` and add data of
+  its own (meta) to the results. The meta is cached together with the result.
 
 Using it
 ========
@@ -65,6 +66,7 @@ Differences from the original
 | `" "`, `"()"`, `"''"` | `Yauaa Exploit` | The same result as an empty useragent |
 | Walk steps `<<`, `<<<`, `<<<<` with 20 or more siblings (custom rules only) | The whole result is `Yauaa Exploit` | Work |
 | Analyzing some useragents yourself | Not possible | `UserAgentHandler` before or after the built-in analysis |
+| Data of your own in the result | Not possible | Meta (`getMeta()`), cached together with the result |
 | Maven coordinates | `nl.basjes.parse.useragent:yauaa` | `io.github.deepcitizen:yauaa` |
 
 The numbers in this table come from the [benchmarks](#benchmarks) below.
@@ -150,7 +152,20 @@ UserAgentAnalyzer uaa = UserAgentAnalyzer
     .build();
 ```
 
-The details are in the [documentation](documentation/content/using/_index.md#analyzing-some-useragents-yourself-handlers).
+A handler can also add data of its own to the result: the meta (key/value strings that are not fields). It sets the
+meta on the result it returns or on the request (also when it returns `null`); the handlers that are called later
+read it and the application gets it with `getMeta(key)`. The meta of the handlers after the analysis is always
+cached together with the result.
+
+```java
+    .addHandlerAfterAnalysis(request -> {
+        request.setMeta("checkedBy", "MyRules");  // Cached with the result
+        return null;                              // The analysis result stays as it is
+    })
+```
+
+The details are in the [documentation](documentation/content/using/_index.md#analyzing-some-useragents-yourself-handlers)
+(and [about the meta](documentation/content/using/_index.md#data-of-your-own-in-the-result-meta)).
 
 What stays the same
 -------------------

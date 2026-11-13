@@ -3,6 +3,8 @@ This is intended as an overview of the major changes
 
 NEXT RELEASE
 ===
+- Analyzer:
+  - New: A result has meta (`UserAgent.getMeta()`): key/value data of the application that is not a field. A `UserAgentHandler` adds it to the result it returns (`MutableUserAgent.setMeta`) or to the request (`Request.setMeta`, also if it does not handle the request) and the handlers that are called later read it (`Request.getMeta`). The meta of the handlers after the analysis is always cached together with the result; the meta of the input of `parse(MutableUserAgent)` and of the handlers before the analysis is added to every result.
 - New/improved detections:
   - ...
 
