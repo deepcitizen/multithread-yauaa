@@ -20,7 +20,7 @@
   <parent>
     <artifactId>yauaa-parent</artifactId>
     <groupId>io.github.deepcitizen</groupId>
-    <version>8.4.0</version>
+    <version>8.4.1-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 

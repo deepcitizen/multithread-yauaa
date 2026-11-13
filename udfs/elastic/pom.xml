@@ -22,7 +22,7 @@
   <parent>
     <artifactId>yauaa-udf-parent</artifactId>
     <groupId>io.github.deepcitizen</groupId>
-    <version>8.4.0</version>
+    <version>8.4.1-SNAPSHOT</version>
   </parent>
   <artifactId>yauaa-elastic-udfs-parent</artifactId>
   <packaging>pom</packaging>
