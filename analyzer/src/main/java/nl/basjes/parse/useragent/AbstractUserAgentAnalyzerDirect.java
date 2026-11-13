@@ -51,6 +51,7 @@ import nl.basjes.parse.useragent.config.TestCase;
 import nl.basjes.parse.useragent.utils.KryoConfig;
 import nl.basjes.parse.useragent.utils.springframework.util.LinkedCaseInsensitiveMap;
 import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -58,6 +59,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -76,6 +78,11 @@ public abstract class AbstractUserAgentAnalyzerDirect implements Analyzer, Analy
     private UserAgentStringMatchMaker matchMaker;
 
     private AnalyzerConfig        analyzerConfig;
+
+    // The handlers that are called before and after the built-in analysis (null if there are none).
+    // These are only set while building the analyzer and the arrays are never changed.
+    private UserAgentHandler @Nullable [] handlersBeforeAnalysis = null;
+    private UserAgentHandler @Nullable [] handlersAfterAnalysis  = null;
 
     @NonNull
     @Override
@@ -197,29 +204,119 @@ public abstract class AbstractUserAgentAnalyzerDirect implements Analyzer, Analy
     /**
      * Parses and analyzes the useragent string provided in the MutableUserAgent instance.
      * NOTE: This method is threadsafe and NOT synchronized: many threads can parse at the same time.
+     * NOTE: Always use the returned result: the provided instance does not get the results if the request
+     *       is handled by a {@link UserAgentHandler} before the analysis (or comes from a cache).
      * @param inputUserAgent The MutableUserAgent instance that is to be parsed and that gets all results
      * @return An ImmutableUserAgent copy of the results that is suitable for further usage and caching.
      */
     @NonNull
-    public ImmutableUserAgent parse(MutableUserAgent inputUserAgent) {
-        if (inputUserAgent == null) {
-            return new ImmutableUserAgent(matchMaker.parse(new MutableUserAgent((String) null)));
+    public ImmutableUserAgent parse(@Nullable MutableUserAgent inputUserAgent) {
+        ImmutableUserAgent handled = handleBeforeAnalysis(inputUserAgent);
+        if (handled != null) {
+            return handled;
         }
-
-        // So we parse the User-Agent header normally
-        MutableUserAgent userAgent = matchMaker.parse(inputUserAgent);
-
-        Map<String, String> requestHeaders = inputUserAgent.getHeaders();
-        if (requestHeaders.size() > 1) {
-            // Then we check to see what ClientHints are available
-            ClientHints clientHints = clientHintsAnalyzer.parse(requestHeaders);
-
-            // Lastly we modify the parsed userAgent with the found clientHints
-            userAgent = clientHintsAnalyzer.merge(this, userAgent, clientHints);
-        }
-        userAgent = matchMaker.hardCodedPostProcessing(userAgent);
-        return new ImmutableUserAgent(userAgent);
+        return analyze(inputUserAgent);
     }
+
+    /**
+     * The built-in analysis followed by the handlers after the analysis.
+     * So this does NOT call the handlers before the analysis and does NOT use any cache.
+     * @param inputUserAgent The MutableUserAgent instance that is to be parsed and that gets all results
+     * @return An ImmutableUserAgent copy of the results that is suitable for further usage and caching.
+     */
+    @NonNull
+    final ImmutableUserAgent analyze(@Nullable MutableUserAgent inputUserAgent) {
+        MutableUserAgent userAgent;
+        if (inputUserAgent == null) {
+            userAgent = matchMaker.parse(new MutableUserAgent((String) null));
+        } else {
+            // So we parse the User-Agent header normally
+            userAgent = matchMaker.parse(inputUserAgent);
+
+            Map<String, String> requestHeaders = inputUserAgent.getHeaders();
+            if (requestHeaders.size() > 1) {
+                // Then we check to see what ClientHints are available
+                ClientHints clientHints = clientHintsAnalyzer.parse(requestHeaders);
+
+                // Lastly we modify the parsed userAgent with the found clientHints
+                userAgent = clientHintsAnalyzer.merge(this, userAgent, clientHints);
+            }
+            userAgent = matchMaker.hardCodedPostProcessing(userAgent);
+        }
+        ImmutableUserAgent result = new ImmutableUserAgent(userAgent);
+
+        UserAgentHandler[] handlers = handlersAfterAnalysis;
+        if (handlers == null) {
+            return result;
+        }
+        ImmutableUserAgent handled = handle(handlers,
+            new UserAgentHandler.Request(getWantedFieldNames(), result.getUserAgentString(), result.getHeaders(), result));
+        return handled == null ? result : handled;
+    }
+
+    // ===============================================================================================================
+    // The handlers
+
+    /**
+     * Calls the handlers before the analysis (if there are any) for a request.
+     * @param userAgentString The User-Agent of the request.
+     * @param requestHeaders All headers of the request (null if the request only has the User-Agent).
+     * @return The (completed) result of the first handler that handled the request or null if none did.
+     */
+    @Nullable
+    final ImmutableUserAgent handleBeforeAnalysis(@Nullable String userAgentString,
+                                                  @Nullable Map<String, String> requestHeaders) {
+        UserAgentHandler[] handlers = handlersBeforeAnalysis;
+        if (handlers == null) {
+            return null;
+        }
+        return handle(handlers, new UserAgentHandler.Request(getWantedFieldNames(), userAgentString, requestHeaders, null));
+    }
+
+    /**
+     * Calls the handlers before the analysis (if there are any) for a request.
+     * @param userAgent The request (null is handled as a request without a User-Agent).
+     * @return The (completed) result of the first handler that handled the request or null if none did.
+     */
+    @Nullable
+    final ImmutableUserAgent handleBeforeAnalysis(@Nullable MutableUserAgent userAgent) {
+        if (handlersBeforeAnalysis == null) {
+            return null;
+        }
+        if (userAgent == null) {
+            return handleBeforeAnalysis(null, null);
+        }
+        return handleBeforeAnalysis(userAgent.getUserAgentString(), userAgent.getHeaders());
+    }
+
+    @Nullable
+    private ImmutableUserAgent handle(@NonNull UserAgentHandler @NonNull [] handlers,
+                                      UserAgentHandler.@NonNull Request request) {
+        for (UserAgentHandler handler : handlers) {
+            MutableUserAgent result = handler.handle(request);
+            if (result != null) {
+                return completeHandlerResult(result, request);
+            }
+        }
+        return null;
+    }
+
+    @NonNull
+    private ImmutableUserAgent completeHandlerResult(@NonNull MutableUserAgent result,
+                                                     UserAgentHandler.@NonNull Request request) {
+        // The result is about this request (also if the handler did not create it with request.newResult()).
+        request.copyHeadersInto(result);
+        // Calculate all fields that are constructed from the provided ones (like AgentNameVersion).
+        return new ImmutableUserAgent(matchMaker.hardCodedPostProcessing(result));
+    }
+
+    void setHandlers(@NonNull List<UserAgentHandler> newHandlersBeforeAnalysis,
+                     @NonNull List<UserAgentHandler> newHandlersAfterAnalysis) {
+        handlersBeforeAnalysis = newHandlersBeforeAnalysis.isEmpty() ? null : newHandlersBeforeAnalysis.toArray(new UserAgentHandler[0]);
+        handlersAfterAnalysis  = newHandlersAfterAnalysis.isEmpty()  ? null : newHandlersAfterAnalysis.toArray(new UserAgentHandler[0]);
+    }
+
+    // ===============================================================================================================
 
     public List<String> supportedClientHintHeaders() {
         return clientHintsAnalyzer.supportedClientHintHeaders();
@@ -292,6 +389,10 @@ public abstract class AbstractUserAgentAnalyzerDirect implements Analyzer, Analy
     public <T extends AbstractUserAgentAnalyzerDirect> T cloneWithSharedAnalyzerConfig(boolean showMatcherStats, boolean delayInitialization) {
         T newInstance = createNewInstance();
         newInstance.configure(getConfig(), showMatcherStats, delayInitialization);
+        // The clone must give the same results so it gets the same handlers (the arrays are never changed).
+        AbstractUserAgentAnalyzerDirect clone = newInstance;
+        clone.handlersBeforeAnalysis = handlersBeforeAnalysis;
+        clone.handlersAfterAnalysis  = handlersAfterAnalysis;
         return newInstance;
     }
 
@@ -337,6 +438,8 @@ public abstract class AbstractUserAgentAnalyzerDirect implements Analyzer, Analy
         private       int                   userAgentMaxLength  = -1; // -1 --> use built in default
         private       boolean               delayInitialization = true;
         private       boolean               keepTests           = true;
+        private final List<UserAgentHandler> handlersBeforeAnalysis = new ArrayList<>();
+        private final List<UserAgentHandler> handlersAfterAnalysis  = new ArrayList<>();
 
         protected void failIfAlreadyBuilt() {
             if (didBuildStep) {
@@ -535,6 +638,34 @@ public abstract class AbstractUserAgentAnalyzerDirect implements Analyzer, Analy
             return (B)this;
         }
 
+        /**
+         * Add a handler that is called for EVERY parse before anything else is done (so also before the cache).
+         * A useragent that it handles is not analyzed by the built-in rules and its result is not cached.
+         * See {@link UserAgentHandler} for the details.
+         * @param handler The handler. Handlers are called in the order in which they were added.
+         * @return the current Builder instance.
+         */
+        @NonNull
+        public B addHandlerBeforeAnalysis(@NonNull UserAgentHandler handler) {
+            failIfAlreadyBuilt();
+            handlersBeforeAnalysis.add(Objects.requireNonNull(handler, "The handler must not be null"));
+            return (B)this;
+        }
+
+        /**
+         * Add a handler that gets the result of the built-in analysis and that can replace it.
+         * It is only called for a useragent that is not in the cache and its result is cached.
+         * See {@link UserAgentHandler} for the details.
+         * @param handler The handler. Handlers are called in the order in which they were added.
+         * @return the current Builder instance.
+         */
+        @NonNull
+        public B addHandlerAfterAnalysis(@NonNull UserAgentHandler handler) {
+            failIfAlreadyBuilt();
+            handlersAfterAnalysis.add(Objects.requireNonNull(handler, "The handler must not be null"));
+            return (B)this;
+        }
+
         boolean showFullVersion = true;
         public B showMinimalVersion() {
             showFullVersion = false;
@@ -588,6 +719,8 @@ public abstract class AbstractUserAgentAnalyzerDirect implements Analyzer, Analy
                     .wantedFieldNames(wantedFieldNames);
 
             uaa.configure(analyzerConfig, showMatcherStats, delayInitialization);
+            // Before the preheat so that also warms up the handlers.
+            uaa.setHandlers(handlersBeforeAnalysis, handlersAfterAnalysis);
 
             if (preheatIterations < 0) {
                 uaa.preHeat();

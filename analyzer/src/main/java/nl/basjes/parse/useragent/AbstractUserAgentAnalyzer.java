@@ -25,9 +25,9 @@ import nl.basjes.parse.useragent.UserAgent.ImmutableUserAgent;
 import nl.basjes.parse.useragent.UserAgent.MutableUserAgent;
 import nl.basjes.parse.useragent.cache.DefaultCacheInstantiator;
 import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.io.Serializable;
-import java.util.Collections;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
@@ -194,13 +194,19 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
 
     /**
      * Parses and analyzes the provided useragent string.
-     * This method is threadsafe and the (very common) cache hit is lock free and does not create any objects.
+     * This method is threadsafe and the (very common) cache hit is lock free and does not create any objects
+     * (only the handlers before the analysis, if there are any, get a new request object).
      * @param userAgentString The User-Agent String that is to be parsed and analyzed
      * @return An ImmutableUserAgent record that holds all the results.
      */
     @NonNull
     @Override
-    public ImmutableUserAgent parse(String userAgentString) {
+    public ImmutableUserAgent parse(@Nullable String userAgentString) {
+        // The handlers before the analysis come before everything else (also before the cache).
+        ImmutableUserAgent handled = handleBeforeAnalysis(userAgentString, null);
+        if (handled != null) {
+            return handled;
+        }
         if (userAgentString != null) {
             Map<String, ImmutableUserAgent> cache = parseCache;
             if (cache != null) {
@@ -211,38 +217,46 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
                 }
             }
         }
-        // Same as super.parse(userAgentString) but without a second cache lookup.
-        return super.parse(Collections.singletonMap(USERAGENT_HEADER, userAgentString));
+        MutableUserAgent userAgent = new MutableUserAgent(getWantedFieldNames());
+        userAgent.addHeader(USERAGENT_HEADER, userAgentString);
+        return parseUsingCache(userAgent);
     }
 
     /**
      * Parses and analyzes the provided request headers.
      * This method is threadsafe and if only the User-Agent is provided the cache hit is lock free and does not
-     * create any objects.
+     * create any objects (only the handlers before the analysis, if there are any, get a new request object).
      * @param requestHeaders A map of all useful request Headers: the "User-Agent" and all Client Hints: "Sec-Ch-Ua"*
      * @return An ImmutableUserAgent record that holds all the results.
      */
     @NonNull
     @Override
-    public ImmutableUserAgent parse(Map<String, String> requestHeaders) {
+    public ImmutableUserAgent parse(@NonNull Map<String, String> requestHeaders) {
         if (requestHeaders.size() == 1) {
-            Map<String, ImmutableUserAgent> cache = parseCache;
-            if (cache != null) {
-                // Only the exact (common) spellings of the header name are handled here.
-                // All other cases are handled by the full code path.
-                Map.Entry<String, String> header = requestHeaders.entrySet().iterator().next();
-                String headerName = header.getKey();
-                String userAgentString = null;
-                if (USERAGENT_HEADER.equals(headerName) || USERAGENT_HEADER_LOWERCASE.equals(headerName)) {
-                    userAgentString = header.getValue();
+            // Only the exact (common) spellings of the header name are handled here.
+            // All other cases are handled by the full code path.
+            Map.Entry<String, String> header = requestHeaders.entrySet().iterator().next();
+            String headerName = header.getKey();
+            if (USERAGENT_HEADER.equals(headerName) || USERAGENT_HEADER_LOWERCASE.equals(headerName)) {
+                String userAgentString = header.getValue();
+                // The handlers before the analysis come before everything else (also before the cache).
+                ImmutableUserAgent handled = handleBeforeAnalysis(userAgentString, requestHeaders);
+                if (handled != null) {
+                    return handled;
                 }
                 if (userAgentString != null) {
-                    // With only a User-Agent the caching key is the useragent itself.
-                    ImmutableUserAgent cachedResult = cache.get(userAgentString);
-                    if (cachedResult != null) {
-                        return cachedResult;
+                    Map<String, ImmutableUserAgent> cache = parseCache;
+                    if (cache != null) {
+                        // With only a User-Agent the caching key is the useragent itself.
+                        ImmutableUserAgent cachedResult = cache.get(userAgentString);
+                        if (cachedResult != null) {
+                            return cachedResult;
+                        }
                     }
                 }
+                MutableUserAgent userAgent = new MutableUserAgent(getWantedFieldNames());
+                userAgent.addHeader(requestHeaders);
+                return parseUsingCache(userAgent);
             }
         }
         return super.parse(requestHeaders);
@@ -252,13 +266,27 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
 
     @NonNull
     @Override
-    public ImmutableUserAgent parse(MutableUserAgent userAgent) {
+    public ImmutableUserAgent parse(@Nullable MutableUserAgent userAgent) {
+        // The handlers before the analysis come before everything else (also before the cache).
+        ImmutableUserAgent handled = handleBeforeAnalysis(userAgent);
+        if (handled != null) {
+            return handled;
+        }
+        return parseUsingCache(userAgent);
+    }
+
+    /**
+     * The cached result or (if not in the cache) the built-in analysis followed by the handlers after the analysis.
+     * So this does NOT call the handlers before the analysis.
+     */
+    @NonNull
+    private ImmutableUserAgent parseUsingCache(@Nullable MutableUserAgent userAgent) {
         // Many caching implementations do not allow null keys and/or values
         if (userAgent == null || userAgent.getUserAgentString() == null) {
             ImmutableUserAgent result = nullAgent;
             if (result == null) {
                 // If multiple threads do this at the same time they all produce the same (immutable) result.
-                result = super.parse(new MutableUserAgent((String) null));
+                result = analyze(new MutableUserAgent((String) null));
                 nullAgent = result;
             }
             return result;
@@ -267,7 +295,7 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
         Map<String, ImmutableUserAgent> cache = parseCache;
         // Do we even have a cache?
         if (cache == null) {
-            return super.parse(userAgent);
+            return analyze(userAgent);
         }
 
         String cachingKey = userAgent.getUserAgentString();
@@ -292,7 +320,7 @@ public abstract class AbstractUserAgentAnalyzer extends AbstractUserAgentAnalyze
         //       If multiple threads parse the same new useragent at the same time they all produce an equal result.
         ImmutableUserAgent result = cache.get(cachingKey);
         if (result == null) {
-            result = super.parse(userAgent);
+            result = analyze(userAgent);
             cache.put(cachingKey, result);
         }
         return result;

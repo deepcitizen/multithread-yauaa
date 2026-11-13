@@ -85,6 +85,53 @@ UserAgentAnalyzer uaa = UserAgentAnalyzer
     .build();
 ```
 
+## Analyzing some useragents yourself (handlers)
+An application can analyze some useragents itself by adding a `UserAgentHandler` to the analyzer.
+A handler gets the request (`getUserAgentString()` and `getHeaders()`) and returns either `null` ("not mine": the request is passed on) or the result.
+
+- A handler that is added with `addHandlerBeforeAnalysis(...)` is called for **every** parse before anything else is done: before the cache is used and before the built-in checks (like the maximum length of a useragent). A useragent that it handles is not analyzed by the rules at all and its result is **not** cached.
+- A handler that is added with `addHandlerAfterAnalysis(...)` gets the result of the built-in analysis (`getAnalysisResult()`) and can replace it. It is only called for a useragent that is not in the cache and its result is cached (just like the normal result), so its result must only depend on the request.
+- The handlers are called in the order in which they were added; the first one that returns a result ends the processing.
+- The returned result (preferably created with `request.newResult()` which gives it the same set of fields as a normal result) is completed by the analyzer: the fields that are calculated from other fields (like `AgentNameVersion` and `AgentVersionMajor`) are filled and the result always has the headers of the request (so `getUserAgentString()` is the useragent that was parsed).
+- Many threads use the same handler at the same time so it must be threadsafe. An exception thrown by a handler is passed on to the caller of `parse`. If the analyzer is serialized the handlers are serialized with it (with Kryo you must also register the classes of your handlers).
+
+A typical use is an application of your own that puts unique ids in its useragent (like `MyApp/1.2.3 did(<uuid>) aid(<random>)`).
+Without a handler every one of these useragents is analyzed by the rules (a cache miss) and each one takes a place in the cache that is never used again (pushing out the useful entries).
+With a handler before the analysis such a useragent costs a few microseconds (instead of a full analysis which takes tens of microseconds) and the cache is not touched.
+For all other useragents the overhead of such a handler is only a few nanoseconds.
+
+```java
+public class MyAppHandler implements UserAgentHandler {
+    private static final String  PREFIX  = "MyApp/";
+    private static final Pattern VERSION = Pattern.compile("[0-9]{1,5}(\\.[0-9]{1,5}){0,3}");
+
+    @Override
+    public MutableUserAgent handle(Request request) {
+        String userAgent = request.getUserAgentString();
+        if (userAgent == null || !userAgent.startsWith(PREFIX)) {
+            return null; // Not ours: the next handler (or the normal analysis) gets it.
+        }
+        // Anyone can send anything: check the input yourself.
+        int end = userAgent.indexOf(' ', PREFIX.length());
+        String version = userAgent.substring(PREFIX.length(), end < 0 ? userAgent.length() : end);
+        if (!VERSION.matcher(version).matches()) {
+            return null;
+        }
+        MutableUserAgent result = request.newResult();
+        result.set(DEVICE_CLASS,          "Phone",   1000);
+        result.set(OPERATING_SYSTEM_NAME, "Android", 1000);
+        result.set(AGENT_NAME,            "MyApp",   1000);
+        result.set(AGENT_VERSION,         version,   1000);
+        return result;
+    }
+}
+
+UserAgentAnalyzer uaa = UserAgentAnalyzer
+    .newBuilder()
+    .addHandlerBeforeAnalysis(new MyAppHandler())
+    .build();
+```
+
 ## Logging dependencies
 The Yauaa engine uses Log4j2 API as the logging framework.
 

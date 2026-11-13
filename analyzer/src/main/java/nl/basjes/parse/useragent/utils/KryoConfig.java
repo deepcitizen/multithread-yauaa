@@ -23,6 +23,7 @@ import nl.basjes.parse.useragent.AbstractUserAgentAnalyzerDirect;
 import nl.basjes.parse.useragent.AgentField;
 import nl.basjes.parse.useragent.Analyzer;
 import nl.basjes.parse.useragent.UserAgent;
+import nl.basjes.parse.useragent.UserAgentHandler;
 import nl.basjes.parse.useragent.analyze.MatchMaker;
 import nl.basjes.parse.useragent.analyze.Matcher;
 import nl.basjes.parse.useragent.analyze.MatcherAction;
@@ -222,5 +223,8 @@ public final class KryoConfig {
         kryo.register(StepUp.class);
 
         StringPrefixMap.configureKryo(kryo);
+
+        // The handlers (the classes of the actual handlers must be registered by the application)
+        kryo.register(UserAgentHandler[].class);
     }
 }

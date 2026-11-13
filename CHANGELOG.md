@@ -13,6 +13,7 @@ NEXT RELEASE
   - Fixed: A useragent with deeply nested brackets (about 150 levels, fewer in a thread with a smaller stack) made the parser fail with a StackOverflowError. Useragents with brackets nested more than 20 levels deep are now reported as a Hacker (HackerAttackVector 'Stack overflow'); a StackOverflowError in the parser gives the same result.
   - Fixed: A useragent that is reduced to an empty string by the cleanup (like " ", "()" or "''") was reported as a "Yauaa Exploit"; it now gets the same result as the empty useragent.
   - Fixed: The walk steps `<<`, `<<<` and `<<<<` failed (making the entire result a "Yauaa Exploit") if there were 20 or more siblings before the starting point (only reachable with custom rules).
+  - New: An application can analyze some useragents itself with a `UserAgentHandler`: before the built-in analysis (`addHandlerBeforeAnalysis`: called for every parse before the cache, the result is not cached so useragents with random ids do not fill the cache) or after it (`addHandlerAfterAnalysis`: can replace the result of the built-in analysis, the result is cached).
 - New/improved detections:
   - Debian/Ubuntu APT
 
